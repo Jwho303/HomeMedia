@@ -1,0 +1,119 @@
+:root {
+  /* Surfaces */
+  --bg:                #000000;
+  --surface:           #0a0a0a;
+  --surface-elevated:  #161616;
+  --surface-pressed:   #262626;
+  --border:            #1a1a1a;
+  --border-subtle:     #141414;
+  --border-strong:     #262626;
+
+  /* Text */
+  --text-primary:      #ffffff;
+  --text-secondary:    #a0a0a0;
+  --text-tertiary:     #666666;
+  --text-disabled:     #404040;
+
+  /* Accent (hot pink / magenta) */
+  --accent:            #ff2d92;
+  --accent-hover:      #ff5aa8;
+  --accent-pressed:    #e01f7f;
+  --accent-subtle:     rgba(255, 45, 146, 0.16);
+  --accent-glow:       rgba(255, 45, 146, 0.45);
+  --on-accent:         #ffffff;
+
+  /* Status */
+  --watched:           #3b6d11;
+  --on-watched:        #ffffff;
+  --error:             #ff453a;
+  --on-error:          #ffffff;
+
+  /* Player chrome */
+  --scrim-strong:      rgba(0, 0, 0, 0.85);
+  --scrim-soft:        rgba(0, 0, 0, 0.6);
+  --scrim-faint:       rgba(0, 0, 0, 0.4);
+  --on-scrim:          #ffffff;
+  --on-scrim-secondary: rgba(255, 255, 255, 0.65);
+
+  --scrub-track:       rgba(255, 255, 255, 0.18);
+  --scrub-buffered:    rgba(255, 255, 255, 0.32);
+  --scrub-played:      var(--accent);
+
+  /* Shadows */
+  --shadow-sm:         0 1px 3px rgba(0, 0, 0, 0.5);
+  --shadow-md:         0 4px 12px rgba(0, 0, 0, 0.55);
+  --shadow-lg:         0 16px 36px rgba(0, 0, 0, 0.65);
+  --shadow-popover:    0 16px 36px rgba(0, 0, 0, 0.7);
+  --shadow-accent:     0 0 12px var(--accent-glow);
+
+  /* Radii */
+  --radius-xs:         2px;
+  --radius-sm:         4px;
+  --radius-md:         6px;
+  --radius-lg:         10px;
+  --radius-pill:       999px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+::selection {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+
+/* Custom scrollbars — accent-glow thumb on true black for the OLED emissive feel.
+ * Applies to the page and any shadow-DOM scroll containers that opt in by
+ * inheriting these colors via standard scrollbar properties. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-accent);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-hover);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: var(--surface-pressed); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}

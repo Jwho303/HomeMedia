@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Eclipse — streaming app icon
+  Rounded black square. Magenta five-point star centered and full-size,
+  smaller white star offset to the upper-right.
+
+  Colors:
+    Background:    #000000  (true OLED black)
+    Primary star:  #ff2d92  (hot pink / magenta)
+    Accent star:   #ffffff  (white)
+
+  Geometry:
+    Background corner radius: 22% of side (matches iOS app icon proportion).
+    Magenta star: centered at (50, 50), outer radius 50, inner radius 19.10.
+    White star:   centered at (68, 33), outer radius 18, inner radius 6.88.
+
+  Resolution-independent — renders cleanly at any size from 16px to 1024px+.
+  Default render size 1024×1024; override via CSS width/height as needed.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 100 100"
+     width="1024"
+     height="1024"
+     role="img"
+     aria-labelledby="iconTitle iconDesc">
+  <title id="iconTitle">Streaming app icon</title>
+  <desc id="iconDesc">A magenta five-point star centered on a midnight black rounded-square background, with a smaller white star overlapping in the upper-right.</desc>
+
+  <!-- Background -->
+  <rect width="100" height="100" rx="22" ry="22" fill="#000000"/>
+
+  <!-- Primary star (magenta) — centered, full-size -->
+  <path d="M50 0 L61.23 34.55 L97.55 34.55 L68.17 55.90 L79.39 90.45 L50 69.10 L20.61 90.45 L31.83 55.90 L2.45 34.55 L38.77 34.55 Z"
+        fill="#ff2d92"/>
+
+  <!-- Accent star (white) — smaller, offset upper-right -->
+  <path d="M68 15 L72.04 27.44 L85.12 27.44 L74.54 35.13 L78.58 47.56 L68 39.88 L57.42 47.56 L61.46 35.13 L50.88 27.44 L63.96 27.44 Z"
+        fill="#ffffff"/>
+</svg>

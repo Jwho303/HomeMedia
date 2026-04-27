@@ -1,0 +1,39 @@
+{
+  "name": "homemedia",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "scan": "tsx src/cli/scan.ts",
+    "review": "tsx src/cli/review.ts",
+    "dev": "tsx watch src/server.ts",
+    "dev:all": "concurrently -n api,web -c blue,magenta \"npm run dev\" \"npm --prefix web run dev\"",
+    "start": "tsx src/server.ts",
+    "build": "npm --prefix web install && npm --prefix web run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "hls-capture": "node scripts/hls-capture.mjs"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.3.0",
+    "better-sqlite3": "^12.9.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "p-throttle": "^8.1.0",
+    "parse-torrent-title": "^2.1.0",
+    "undici": "^8.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.6.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.2",
+    "vitest": "^4.1.5"
+  }
+}
