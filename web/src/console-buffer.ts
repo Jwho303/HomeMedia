@@ -36,7 +36,9 @@ function formatArg(a: unknown): string {
     return String(a);
   }
   try {
-    const s = JSON.stringify(a);
+    // Two-space indent so the captured report is readable when the
+    // server pretty-prints client-log payloads.
+    const s = JSON.stringify(a, null, 2);
     return s ?? String(a);
   } catch {
     return String(a);

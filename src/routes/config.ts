@@ -6,9 +6,16 @@ import type { FastifyInstance } from 'fastify';
  *  HLS-flag carrier.
  *
  *  Phase 4 (post-0.1.6): HLS is the only player path; the flag is hardcoded
- *  true so older cached client bundles (still gating on it) keep working. */
+ *  true so older cached client bundles (still gating on it) keep working.
+ *
+ *  Phase 5 (post-0.1.9): the server-driven player is the only path;
+ *  `playerSession:true` is hardcoded so any older client bundle still
+ *  gating on the flag picks the new path. */
 export async function registerConfigRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/config', async () => {
-    return { hlsPlayer: true };
+    return {
+      hlsPlayer: true,
+      playerSession: true,
+    };
   });
 }

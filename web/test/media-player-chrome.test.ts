@@ -27,9 +27,9 @@ function mockJson(body: unknown, status = 200): Response {
 }
 
 async function flush(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
 }
 
 interface Internals {
@@ -57,14 +57,32 @@ describe('media-player chrome / popover state', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
       const u = url as string;
       if (u.startsWith('/api/playback/')) return mockJson({ position: 0, duration: 0, watched: false });
-      // Phase 4: HLS-only player flow.
-      if (u.startsWith('/api/stream-meta/')) {
+      // 0.1.9 Phase 5: server-driven player flow.
+      if (u.startsWith('/api/config')) return mockJson({ hlsPlayer: true, playerSession: true });
+      if (u.match(/\/api\/player\/[^/]+\/open/)) {
         return mockJson({
-          relPath: 'X.mp4', absPath: '/m/X.mp4',
-          container: 'mp4', videoCodec: 'h264', audioCodec: 'aac',
-          durationSeconds: 0, audioStreams: [], subStreams: [], chapters: [], subs: [],
+          playerId: 'test-player',
+          relPath: 'X.mp4',
+          reused: false,
+          session: {
+            sessionId: 'test-session',
+            playlistUrl: '/api/hls/test-session/master.m3u8',
+            encodedWindow: { from: 0, to: 30 },
+            startSeconds: 0,
+          },
+          metadata: {
+            durationSeconds: 0, container: 'mp4', videoCodec: 'h264', audioCodec: 'aac',
+            audioStreams: [], subStreams: [], chapters: [], siblingSubs: [],
+            title: null, posterUrl: null, backdropUrl: null, imdbRating: null,
+            manualOverride: false, activeAudioStreamIndex: null, activeBurnSubStreamIndex: null,
+          },
+          resume: { position: 0, duration: 0, watched: false },
         });
       }
+      if (u.match(/\/api\/player\/[^/]+\/state/)) {
+        return mockJson({ status: 'alive', encodedWindow: { from: 0, to: 30 }, encodePaused: false });
+      }
+      if (u.startsWith('/api/player/')) return new Response('', { status: 204 });
       if (u.startsWith('/api/hls/')) {
         return new Response('#EXTM3U\n', {
           status: 200,

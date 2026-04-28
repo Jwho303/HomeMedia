@@ -6,14 +6,26 @@ import type {
   ShareStatus,
   Playback,
   PlaybackPostBody,
-  StreamMeta,
   SubInfo,
   ContinueResponse,
   ContinueRow,
   ManualIdentifyCandidate,
   ManualIdentifyItemBody,
   ManualIdentifyEpisodeBody,
+  PlayerOpenResponse,
+  PlayerSeekResponse,
+  PlayerStateResponse,
+  CapacityExceeded,
 } from './types.js';
+
+/** 0.1.9 — thrown when /open hits a concurrency cap. The player UI shows
+ *  a polite "Encoder busy" panel; the body is preserved for diagnostics. */
+export class PlayerCapacityError extends Error {
+  constructor(public readonly body: CapacityExceeded) {
+    super(`capacity_exceeded:${body.kind}`);
+    this.name = 'PlayerCapacityError';
+  }
+}
 
 export class ShareOfflineError extends Error {
   constructor() {
@@ -131,69 +143,107 @@ export const apiReprobeItem = (id: number): Promise<ReprobeKickoff> =>
 export const apiReprobeEpisode = (id: number): Promise<ReprobeKickoff> =>
   api<ReprobeKickoff>(`/api/reprobe-episode/${id}`, { method: 'POST' });
 
-/** 0.1.6 — HLS playlist URL for a path. The relPath rides as `?path=…`
- *  because Fastify's router requires wildcards in the last URL segment.
- *  Caller may pass start/audio/burnSub overrides. */
-export interface HlsUrlOpts {
-  startSeconds?: number;
-  audioStreamIndex?: number;
-  burnSubStreamIndex?: number;
-}
-
-export function hlsPlaylistUrl(relPath: string, opts: HlsUrlOpts = {}): string {
-  const params = new URLSearchParams();
-  params.set('path', relPath);
-  if (opts.startSeconds && opts.startSeconds > 0) {
-    params.set('start', String(Math.floor(opts.startSeconds)));
-  }
-  if (opts.audioStreamIndex !== undefined) {
-    params.set('audio', String(opts.audioStreamIndex));
-  }
-  if (opts.burnSubStreamIndex !== undefined) {
-    params.set('burnSub', String(opts.burnSubStreamIndex));
-  }
-  return `/api/hls/master.m3u8?${params.toString()}`;
-}
-
-/** 0.1.6 — DELETE the HLS session (best-effort cleanup on player teardown). */
-export function hlsDeleteUrl(sessionId: string): string {
-  return `/api/hls/${sessionId}`;
-}
-
-/** 0.1.6 — sendBeacon-friendly POST endpoint that aliases DELETE. The Beacon
- *  API doesn't let you set the HTTP method, so the route accepts POST as
- *  equivalent to DELETE for tab-close cleanup. */
+/** 0.1.6 — sendBeacon-friendly POST endpoint that aliases DELETE on the
+ *  per-session HLS resource. Still exported because the Beacon API
+ *  doesn't let callers set the HTTP method, and the segment-cleanup path
+ *  on tab close uses it. */
 export function hlsBeaconUrl(sessionId: string): string {
   return `/api/hls/${sessionId}/delete`;
 }
 
-/** Heartbeat ping. The player fires this every ~20s while playing so
- *  the server's idle GC doesn't reap a session whose client has buffered
- *  enough to skip segment fetches for a minute or more. Returns 204 when
- *  the session is alive, 410 when it's gone (caller should respawn). */
-export function hlsTouchUrl(sessionId: string): string {
-  return `/api/hls/${sessionId}/touch`;
+/** 0.1.9 — server-driven player API. The client carries `playerId` (UUID)
+ *  on every request; the server owns ffmpeg lifecycle + seek decisions. */
+
+export interface PlayerOpenInput {
+  relPath: string;
+  audioStreamIndex?: number;
+  burnSubStreamIndex?: number | null;
+  startSeconds?: number;
 }
 
-export type HlsTouchOutcome = 'alive' | 'gone' | 'error';
+async function playerPost<T>(playerId: string, suffix: string, body: unknown): Promise<T> {
+  const r = await fetch(`/api/player/${encodeURIComponent(playerId)}${suffix}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 503) {
+    const cap = (await r.json().catch(() => null)) as CapacityExceeded | null;
+    if (cap && cap.error === 'capacity_exceeded') throw new PlayerCapacityError(cap);
+    throw new Error('503 Service Unavailable');
+  }
+  if (r.status === 410) {
+    // /state returns 410 when the player is gone; let the caller branch.
+    return (await r.json().catch(() => ({}))) as T;
+  }
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as T;
+}
 
-/** POST a heartbeat to /touch. Treats network errors as `error` (transient,
- *  not session-gone) and 410 as `gone` (session was GCed; respawn). */
-export async function hlsTouch(sessionId: string): Promise<HlsTouchOutcome> {
+export const apiPlayerOpen = (
+  playerId: string,
+  input: PlayerOpenInput,
+): Promise<PlayerOpenResponse> => playerPost<PlayerOpenResponse>(playerId, '/open', input);
+
+export const apiPlayerSeek = (
+  playerId: string,
+  absoluteSeconds: number,
+): Promise<PlayerSeekResponse> =>
+  playerPost<PlayerSeekResponse>(playerId, '/seek', { absoluteSeconds });
+
+export const apiPlayerState = (
+  playerId: string,
+  currentLocalSeconds: number,
+  paused: boolean,
+): Promise<PlayerStateResponse> =>
+  playerPost<PlayerStateResponse>(playerId, '/state', { currentLocalSeconds, paused });
+
+export const apiPlayerTracks = (
+  playerId: string,
+  body: {
+    audioStreamIndex?: number;
+    burnSubStreamIndex?: number | null;
+    startSeconds?: number;
+  },
+): Promise<PlayerOpenResponse> => playerPost<PlayerOpenResponse>(playerId, '/tracks', body);
+
+export async function apiPlayerClose(playerId: string): Promise<void> {
   try {
-    const r = await fetch(hlsTouchUrl(sessionId), { method: 'POST' });
-    if (r.status === 204) return 'alive';
-    if (r.status === 410) return 'gone';
-    return 'error';
+    await fetch(`/api/player/${encodeURIComponent(playerId)}`, { method: 'DELETE' });
   } catch {
-    return 'error';
+    /* tab is closing — best effort */
   }
 }
 
-/** 0.1.6 — GET /api/stream-meta/:relPath (read-only probe metadata for the
- *  HLS player UI). */
-export const apiStreamMeta = (relPath: string): Promise<StreamMeta> =>
-  api<StreamMeta>(`/api/stream-meta/${encodeURIComponent(relPath)}`);
+/** sendBeacon-friendly close URL — DELETE has no body, so the POST alias
+ *  is used by the player's pagehide handler. */
+export function playerBeaconUrl(playerId: string): string {
+  return `/api/player/${encodeURIComponent(playerId)}/delete`;
+}
+
+/** 0.1.9 — /api/config now carries `playerSession` alongside `hlsPlayer`. */
+export interface ApiConfig {
+  hlsPlayer: boolean;
+  playerSession: boolean;
+}
+
+let cachedApiConfig: ApiConfig | null = null;
+
+export async function apiConfig(): Promise<ApiConfig> {
+  if (cachedApiConfig) return cachedApiConfig;
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) throw new Error(`${r.status}`);
+    const body = (await r.json()) as Partial<ApiConfig>;
+    cachedApiConfig = {
+      hlsPlayer: body.hlsPlayer === true,
+      playerSession: body.playerSession === true,
+    };
+  } catch {
+    cachedApiConfig = { hlsPlayer: true, playerSession: false };
+  }
+  return cachedApiConfig;
+}
 
 export const subsUrl = (relPath: string): string =>
   `/api/subs/${encodeURIComponent(relPath)}`;

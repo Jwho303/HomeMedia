@@ -28,6 +28,22 @@ const Schema = z.object({
    *  `index.m3u8` + `seg-NNNNN.ts` files. Cleaned up on session teardown
    *  and on server startup (orphans from a hard crash). */
   HLS_CACHE_DIR: z.string().default(defaultHlsCacheDir),
+  /** 0.1.9 — global ceiling on concurrent player instances. New /open
+   *  requests beyond this are 503 capacity_exceeded. */
+  MAX_CONCURRENT_PLAYERS: z.coerce.number().int().positive().default(3),
+  /** 0.1.9 — per-identity (today: per-IP) ceiling. When 1, /open from an
+   *  IP that already has a player adopts the existing player as a media
+   *  swap; when >1, opens additional instances up to the cap. */
+  MAX_PLAYERS_PER_IP: z.coerce.number().int().positive().default(1),
+  /** 0.1.9 — encoder pacing target. ffmpeg is suspended when its emitted
+   *  segments cover this many seconds past the client's reported position. */
+  ENCODE_AHEAD_SECONDS: z.coerce.number().int().positive().default(30),
+  /** 0.1.9 — encoder pacing resume threshold. Hysteresis vs ENCODE_AHEAD
+   *  keeps the pace controller from flapping. */
+  ENCODE_RESUME_SECONDS: z.coerce.number().int().positive().default(10),
+  /** 0.1.9 — wipe a player's segments + state if no /state ping arrives
+   *  for this long. Default 30 minutes. */
+  PLAYER_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(1800),
   // Optional — only read on darwin for `mount volume` reconnect.
   SMB_HOST: z.string().optional(),
   SMB_SHARE: z.string().optional(),
@@ -52,6 +68,12 @@ export interface Config {
   dbPath: string;
   cacheDir: string;
   hlsCacheDir: string;
+  /** 0.1.9 caps + pacing knobs. */
+  maxConcurrentPlayers: number;
+  maxPlayersPerIp: number;
+  encodeAheadSeconds: number;
+  encodeResumeSeconds: number;
+  playerIdleTimeoutSeconds: number;
   smbHost: string | null;
   smbShare: string | null;
 }
@@ -78,6 +100,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: path.resolve(parsed.data.DB_PATH),
     cacheDir: path.resolve(parsed.data.CACHE_DIR),
     hlsCacheDir: path.resolve(parsed.data.HLS_CACHE_DIR),
+    maxConcurrentPlayers: parsed.data.MAX_CONCURRENT_PLAYERS,
+    maxPlayersPerIp: parsed.data.MAX_PLAYERS_PER_IP,
+    encodeAheadSeconds: parsed.data.ENCODE_AHEAD_SECONDS,
+    encodeResumeSeconds: parsed.data.ENCODE_RESUME_SECONDS,
+    playerIdleTimeoutSeconds: parsed.data.PLAYER_IDLE_TIMEOUT_SECONDS,
     smbHost: parsed.data.SMB_HOST?.trim() || null,
     smbShare: parsed.data.SMB_SHARE?.trim() || null,
   };

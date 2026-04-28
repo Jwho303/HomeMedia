@@ -11,8 +11,8 @@ import { registerLibraryRoutes } from './routes/library.js';
 import { registerPlaybackRoutes } from './routes/playback.js';
 import { registerRefreshRoutes } from './routes/refresh.js';
 import { registerReprobeRoutes } from './routes/reprobe.js';
-import { registerHlsRoutes } from './routes/hls.js';
-import { registerStreamMetaRoutes } from './routes/stream-meta.js';
+import { registerHlsRoutes } from './routes/hls-segments.js';
+import { registerPlayerRoutes } from './routes/player.js';
 import { registerClientLogRoutes } from './routes/client-log.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerSubsRoutes } from './routes/subs.js';
@@ -20,6 +20,7 @@ import { registerEmbeddedSubsRoutes } from './routes/embedded-subs.js';
 import { registerManualIdentifyRoutes } from './routes/manual-identify.js';
 import { shareGuard } from './middleware/share-guard.js';
 import { getHlsSessionManager } from './streaming/hls-session.js';
+import { getPlayerInstanceManager, setPlayerInstanceManagerForTests, PlayerInstanceManager } from './player/instance.js';
 import { detectEncoders } from './encoders.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -87,17 +88,32 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
   // loopback-only access internally; no shareGuard needed.
   await app.register(registerAdminRoutes);
 
+  // 0.1.9 — make sure the player manager singleton exists before any
+  // route handler reaches for it. Tests may have already injected one.
+  try {
+    getPlayerInstanceManager();
+  } catch {
+    setPlayerInstanceManagerForTests(
+      new PlayerInstanceManager({ hlsSessionManager: getHlsSessionManager() }),
+    );
+  }
+
   await app.register(async (s) => {
     s.addHook('onRequest', shareGuard);
     await registerRefreshRoutes(s);
     await registerReprobeRoutes(s);
     await registerHlsRoutes(s);
-    await registerStreamMetaRoutes(s);
+    await registerPlayerRoutes(s);
     await registerSubsRoutes(s);
     await registerEmbeddedSubsRoutes(s);
   });
 
   app.addHook('onClose', async () => {
+    try {
+      await getPlayerInstanceManager().shutdownAll();
+    } catch {
+      /* manager may not have been constructed in test paths */
+    }
     await getHlsSessionManager().shutdownAll();
   });
 
@@ -142,8 +158,10 @@ export async function start(): Promise<void> {
   app.log.info({ evt: 'startup', encoders: caps }, 'hardware encoders detected');
   // 0.1.6 — sweep the HLS cache root at boot. A hard crash leaves session
   // dirs behind; idle GC only touches sessions this process knows about.
+  // 0.1.9 — also wipes <playerId>/ trees from any prior process.
   try {
     await getHlsSessionManager().cleanupOrphans();
+    await getPlayerInstanceManager().cleanupOrphans();
   } catch (err) {
     app.log.warn({ evt: 'hls.orphanRmFailed', err }, 'hls orphan cleanup failed');
   }

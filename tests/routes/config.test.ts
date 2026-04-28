@@ -16,13 +16,15 @@ afterAll(async () => {
 });
 
 describe('config routes (0.1.7 / Phase 4 cleanup)', () => {
-  it('GET /api/config returns hlsPlayer:true — HLS is the only path', async () => {
+  it('GET /api/config returns hlsPlayer:true and playerSession (default false)', async () => {
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();
     try {
       const res = await app.inject({ method: 'GET', url: '/api/config' });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ hlsPlayer: true });
+      const body = res.json();
+      expect(body.hlsPlayer).toBe(true);
+      expect(typeof body.playerSession).toBe('boolean');
     } finally {
       await app.close();
     }

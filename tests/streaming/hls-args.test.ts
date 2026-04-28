@@ -123,6 +123,49 @@ describe('buildHlsArgs()', () => {
     expect(args).not.toContain('mpeg4_unpack_bframes');
   });
 
+  it('remux-copy path inserts h264_mp4toannexb BSF (0.1.9.1 — MP4→mpegts NALU framing)', () => {
+    // Without this, h264 in MP4's AVCC framing (length-prefix) gets
+    // copied as-is into mpegts (which needs Annex-B start codes); the
+    // muxer logs "h264 bitstream error, startcode missing" for every
+    // NALU and Chrome MSE fails with CHUNK_DEMUXER_ERROR_APPEND_FAILED.
+    const { args } = buildHlsArgs(
+      input({
+        container: 'mov,mp4,m4a,3gp,3g2,mj2',
+        videoCodec: 'h264',
+        audioCodec: 'aac',
+        durationSeconds: 5931,
+      }),
+      CACHE,
+    );
+    const bsfIdx = args.indexOf('-bsf:v');
+    expect(bsfIdx).toBeGreaterThan(-1);
+    expect(args[bsfIdx + 1]).toBe('h264_mp4toannexb');
+  });
+
+  it('remux-copy path passes -ignore_editlist 1 BEFORE -i (0.1.9.1 — kill edts PTS shift)', () => {
+    // YTS-style MP4s ship with an `edts` edit list whose first entry can
+    // be a 90s preroll. The MP4 demuxer applies edit lists by default and
+    // emits frames with PTS shifted by the offset → ffmpeg's HLS muxer
+    // numbers the first segment seg-NNNNN instead of seg-00000, and
+    // hls.js fetches a playlist whose timeline doesn't match the segment
+    // filenames → DEMUXER_ERROR_COULD_NOT_PARSE on any out-of-buffer seek.
+    const { args } = buildHlsArgs(
+      input({
+        container: 'mov,mp4,m4a,3gp,3g2,mj2',
+        videoCodec: 'h264',
+        audioCodec: 'aac',
+        durationSeconds: 5931,
+      }),
+      CACHE,
+    );
+    const ignoreIdx = args.indexOf('-ignore_editlist');
+    const inputIdx = args.indexOf('-i');
+    expect(ignoreIdx).toBeGreaterThan(-1);
+    expect(ignoreIdx).toBeLessThan(inputIdx);
+    expect(args[ignoreIdx + 1]).toBe('1');
+    expect(args).not.toContain('-copyts');
+  });
+
   it('remux-copy path uses naive input-side seek (no lead/lag, -c:v copy cannot drop frames)', () => {
     const { args } = buildHlsArgs(
       input({

@@ -55,6 +55,21 @@ export interface HlsSession {
   state: HlsSessionState;
   /** Last few stderr lines from ffmpeg, kept for diagnostics. */
   recentStderr: string[];
+  /** 0.1.9 — first and last absolute source-second this ffmpeg has emitted
+   *  segments for. `from` is `startSeconds`; `to` advances as segments land
+   *  on disk. The manager keeps this in sync via `updateEncodedWindow()`. */
+  encodedWindow: { from: number; to: number };
+  /** 0.1.9 — maps segment number → absolute start/end time. Built from the
+   *  playlist file as ffmpeg writes it. Used by /seek for the in-window
+   *  decision and by the playlist rewriter when retained segments are
+   *  prepended on respawn. */
+  segmentTimings: Array<{ sn: number; from: number; to: number }>;
+  /** 0.1.9 — set by the pace controller when ffmpeg is SIGSTOPed (POSIX) or
+   *  killed (Windows). Surfaced on /state responses for the runway-tick UI. */
+  encodePaused: boolean;
+  /** 0.1.9 — when true, `disposeSession()` skips the cacheDir rm. Segments
+   *  outlive the session; player-layer retention rules clean them up. */
+  keepCacheOnDispose?: boolean;
 }
 
 interface ManagerLogger {
@@ -96,6 +111,16 @@ export interface CreateOptions {
    *  `burnSubStreamIndex` is set; the route layer derives it from the probe's
    *  `subStreams[i].textBased`. */
   burnSubTextBased?: boolean;
+  /** 0.1.9 — override the on-disk cache directory. Used by the player
+   *  manager to land segments under `<playerId>/<relPathHash>/<paramsHash>/`
+   *  so retention rules can outlive any single ffmpeg lifetime. */
+  cacheDir?: string;
+  /** 0.1.9 — when true, `disposeSession()` only kills ffmpeg and drops the
+   *  in-memory entry; segment files are left on disk. The player manager
+   *  uses this so a respawn on the same params can pick up where ffmpeg
+   *  left off. The retention rules (close, relPath swap, idle GC) remove
+   *  segments directly. */
+  keepCacheOnDispose?: boolean;
 }
 
 const STDERR_RING = 50;
@@ -153,7 +178,7 @@ export class HlsSessionManager {
     }
 
     const id = crypto.randomUUID();
-    const cacheDir = path.join(this.cacheRoot, id);
+    const cacheDir = opts.cacheDir ?? path.join(this.cacheRoot, id);
     await fs.mkdir(cacheDir, { recursive: true });
 
     const pipelineInput: PipelineInput = {
@@ -175,10 +200,11 @@ export class HlsSessionManager {
     const { profile, args } = buildHlsArgs(pipelineInput, cacheDir);
 
     const ffmpeg = this.spawnFn('ffmpeg', args);
+    const startSecondsApplied = opts.startSeconds ?? 0;
     const session: HlsSession = {
       id,
       relPath: input.relPath,
-      startSeconds: opts.startSeconds ?? 0,
+      startSeconds: startSecondsApplied,
       cacheDir,
       ffmpeg,
       profile,
@@ -187,6 +213,13 @@ export class HlsSessionManager {
       lastTouchedAt: this.now(),
       state: 'starting',
       recentStderr: [],
+      // 0.1.9 — encodedWindow starts as a zero-width range at the spawn
+      // position. The player manager calls `updateEncodedWindow()` after
+      // each segment timings refresh to advance `to`.
+      encodedWindow: { from: startSecondsApplied, to: startSecondsApplied },
+      segmentTimings: [],
+      encodePaused: false,
+      ...(opts.keepCacheOnDispose === true ? { keepCacheOnDispose: true } : {}),
     };
     if (opts.audioStreamIndex !== undefined) session.audioStreamIndex = opts.audioStreamIndex;
     if (opts.burnSubStreamIndex !== undefined) session.burnSubStreamIndex = opts.burnSubStreamIndex;
@@ -406,6 +439,66 @@ export class HlsSessionManager {
     return this.sessions.size;
   }
 
+  /** 0.1.9 — read the on-disk index.m3u8, parse `#EXTINF` durations and
+   *  segment names, and update the session's `encodedWindow` +
+   *  `segmentTimings`. Best-effort: if the playlist isn't readable yet
+   *  this returns the existing window unchanged.
+   *
+   *  The playlist looks like
+   *      #EXTINF:6.000,
+   *      seg-00000.ts
+   *      #EXTINF:6.000,
+   *      seg-00001.ts
+   *      ...
+   *  Segment N spans [from + sum(durations[0..N-1]), from + sum(durations[0..N])]
+   *  in absolute source-seconds. */
+  async refreshEncodedWindow(id: string): Promise<{ from: number; to: number } | null> {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    let raw: string;
+    try {
+      raw = await fs.readFile(path.join(session.cacheDir, 'index.m3u8'), 'utf8');
+    } catch {
+      return session.encodedWindow;
+    }
+    const lines = raw.split(/\r?\n/);
+    const timings: Array<{ sn: number; from: number; to: number }> = [];
+    let cursor = session.startSeconds;
+    let pendingDuration: number | null = null;
+    let mediaSequence = 0;
+    for (const line of lines) {
+      if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+        const n = Number(line.slice('#EXT-X-MEDIA-SEQUENCE:'.length).trim());
+        if (Number.isFinite(n)) mediaSequence = n;
+        continue;
+      }
+      if (line.startsWith('#EXTINF:')) {
+        const tail = line.slice('#EXTINF:'.length);
+        const dur = Number(tail.split(',')[0]);
+        if (Number.isFinite(dur)) pendingDuration = dur;
+        continue;
+      }
+      if (line.length === 0 || line.startsWith('#')) continue;
+      // Segment line.
+      const match = /seg-(\d+)\.ts/.exec(line);
+      if (!match || pendingDuration === null) continue;
+      const sn = Number(match[1]);
+      const from = cursor;
+      const to = cursor + pendingDuration;
+      timings.push({ sn, from, to });
+      cursor = to;
+      pendingDuration = null;
+    }
+    void mediaSequence; // tracked for debugging future ABR work
+    if (timings.length === 0) return session.encodedWindow;
+    session.segmentTimings = timings;
+    session.encodedWindow = {
+      from: session.startSeconds,
+      to: timings[timings.length - 1]!.to,
+    };
+    return session.encodedWindow;
+  }
+
   /** 0.1.7 — surface recent ffmpeg stderr for sessions matching a relPath.
    *  Used by `/api/client-log` to attach the encoder's last words to a
    *  player-side failure report — when MSE rejects a segment we need
@@ -470,6 +563,12 @@ export class HlsSessionManager {
     this.sessions.delete(session.id);
     for (const [k, v] of this.byKey.entries()) {
       if (v === session.id) this.byKey.delete(k);
+    }
+    if (session.keepCacheOnDispose) {
+      // 0.1.9 — segments outlive ffmpeg under the player layer. Retention
+      // is enforced by the player manager (close, relPath swap, params
+      // change, idle GC), not here.
+      return;
     }
     try {
       await fs.rm(session.cacheDir, { recursive: true, force: true });

@@ -188,9 +188,19 @@ function canRemuxHlsCopy(input: PipelineInput): boolean {
  *  layout, so input-side seek is safe here. */
 function buildRemuxHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArray<string> {
   const mode = pickPlaylistMode(input);
-  const inputSide = input.startSeconds && input.startSeconds > 0
-    ? ['-ss', String(Math.floor(input.startSeconds))]
-    : [];
+  // 0.1.9.1 — `-ignore_editlist 1` BEFORE `-i`. YTS-style MP4s carry an
+  // `edts` edit list whose first entry can be a 90-second silence/preroll;
+  // by default the MP4 demuxer applies the edit list and emits frames with
+  // PTS shifted by the edit-list offset. ffmpeg's HLS muxer then numbers
+  // segments by floor(pts / hls_time) → first written segment is
+  // seg-00015 (or wherever) instead of seg-00000, and hls.js fetches a
+  // playlist whose timeline doesn't match the segment filenames →
+  // DEMUXER_ERROR_COULD_NOT_PARSE on the first seek out of buffer.
+  // Ignoring the edit list keeps PTS starting at 0.
+  const inputSide: string[] = ['-ignore_editlist', '1'];
+  if (input.startSeconds && input.startSeconds > 0) {
+    inputSide.push('-ss', String(Math.floor(input.startSeconds)));
+  }
   return [
     '-loglevel', 'info',
     '-y',
@@ -199,10 +209,13 @@ function buildRemuxHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArra
     ...buildMapArgs(input.audioStreamIndex),
     '-c:v', 'copy',
     '-c:a', 'copy',
-    // Forces ffmpeg to write segment boundaries on the source's existing
-    // keyframes rather than trying to recompose. Pairs with the
-    // `independent_segments` HLS flag set in hlsOutputFlags.
-    '-copyts',
+    // 0.1.9.1 — h264 in MP4 uses AVCC framing (length-prefixed NALUs);
+    // mpegts needs Annex-B (start-code-prefixed). ffmpeg usually inserts
+    // h264_mp4toannexb automatically, but the auto-insertion is
+    // unreliable across copy/seek combinations. Force the BSF explicitly.
+    '-bsf:v', 'h264_mp4toannexb',
+    // Belt-and-suspenders: rebase any leftover negative PTS to zero.
+    '-avoid_negative_ts', 'make_zero',
     ...hlsOutputFlags(cacheDir, mode),
   ];
 }

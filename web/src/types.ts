@@ -188,6 +188,68 @@ export interface Chapter {
   title: string | null;
 }
 
+/** 0.1.9 — server-driven player session bundle, returned by /api/player/:id/open. */
+export interface PlayerOpenResponse {
+  playerId: string;
+  relPath: string;
+  reused: boolean;
+  session: {
+    sessionId: string;
+    playlistUrl: string;
+    encodedWindow: { from: number; to: number };
+    startSeconds: number;
+  };
+  metadata: {
+    durationSeconds: number;
+    container: string;
+    videoCodec: string;
+    audioCodec: string;
+    audioStreams: AudioStream[];
+    subStreams: SubStream[];
+    chapters: Chapter[];
+    siblingSubs: SubInfo[];
+    title: string | null;
+    posterUrl: string | null;
+    backdropUrl: string | null;
+    imdbRating: number | null;
+    manualOverride: boolean;
+    activeAudioStreamIndex: number | null;
+    activeBurnSubStreamIndex: number | null;
+  };
+  resume: {
+    position: number;
+    duration: number;
+    watched: boolean;
+  };
+}
+
+/** 0.1.9 — /api/player/:id/seek response. */
+export interface PlayerSeekResponse {
+  sessionId: string;
+  playlistUrl: string;
+  encodedWindow: { from: number; to: number };
+  mode: 'reuse' | 'respawn';
+  action:
+    | { kind: 'set-current-time'; localSeconds: number }
+    | { kind: 'reattach'; pendingResumeAt: number };
+}
+
+/** 0.1.9 — /api/player/:id/state response. */
+export interface PlayerStateResponse {
+  status: 'alive' | 'gone';
+  encodedWindow: { from: number; to: number };
+  encodePaused: boolean;
+}
+
+/** 0.1.9 — body of a 503 capacity_exceeded reply. */
+export interface CapacityExceeded {
+  error: 'capacity_exceeded';
+  kind: 'global' | 'per_ip';
+  limit: number;
+  active: number;
+  retryAfterSeconds: number | null;
+}
+
 export interface StreamProbe {
   decision: PlayDecision;
   subs: SubInfo[];
