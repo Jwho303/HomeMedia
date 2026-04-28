@@ -8,10 +8,8 @@ import {
   apiPlaybackPost,
   apiSeries,
   apiShareStatus,
-  apiStreamProbe,
   apiSubsList,
   ShareOfflineError,
-  streamUrl,
   subsUrl,
 } from '../src/api.js';
 
@@ -67,70 +65,8 @@ describe('api client', () => {
     expect(out).toEqual({ position: 5, duration: 100, watched: false });
   });
 
-  it('streamUrl encodes the path', () => {
-    expect(streamUrl('A B/C.mkv')).toBe('/api/stream/A%20B%2FC.mkv');
-  });
-
   it('subsUrl encodes the path', () => {
     expect(subsUrl('A B/C.srt')).toBe('/api/subs/A%20B%2FC.srt');
-  });
-
-  it('apiStreamProbe returns "direct" on 206', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('x', { status: 206, headers: { 'Content-Range': 'bytes 0-0/1024' } }),
-    );
-    const out = await apiStreamProbe('Foo.mp4');
-    expect(out.decision).toBe('direct');
-    expect(out.subs).toEqual([]);
-  });
-
-  it('apiStreamProbe returns "remux" + subs on 415', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({ decision: 'remux', subs: [{ path: 'F.en.srt', lang: 'en', ext: 'srt' }] }),
-        { status: 415, headers: { 'Content-Type': 'application/json' } },
-      ),
-    );
-    const out = await apiStreamProbe('Foo.mkv');
-    expect(out.decision).toBe('remux');
-    expect(out.subs).toHaveLength(1);
-    expect(out.subs[0]!.lang).toBe('en');
-  });
-
-  it('apiStreamProbe returns "external" + absPath on 415', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({ decision: 'external', subs: [], absPath: '/Volumes/media/Foo.mkv' }),
-        { status: 415, headers: { 'Content-Type': 'application/json' } },
-      ),
-    );
-    const out = await apiStreamProbe('Foo.mkv');
-    expect(out.decision).toBe('external');
-    expect(out.absPath).toBe('/Volumes/media/Foo.mkv');
-  });
-
-  it('apiStreamProbe throws ShareOfflineError on 503', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ error: 'share_offline' }), {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-    await expect(apiStreamProbe('x.mkv')).rejects.toBeInstanceOf(ShareOfflineError);
-  });
-
-  it('apiStreamProbe sends Range: bytes=0-0', async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response('', { status: 206 }));
-    await apiStreamProbe('a.mkv');
-    expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/stream/a.mkv',
-      expect.objectContaining({
-        method: 'GET',
-        headers: { Range: 'bytes=0-0' },
-      }),
-    );
   });
 
   it('apiSeries passes through inline playback + runtime fields (0.1.3.1)', async () => {

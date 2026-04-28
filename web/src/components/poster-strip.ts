@@ -182,6 +182,39 @@ export class PosterStrip extends LitElement {
       box-shadow: var(--shadow-accent);
     }
 
+    /* IMDb rating pill — gold star + bare /10 number, top-left. When the
+     * NEW badge is also showing it stacks below the rating; the helper
+     * class .has-rating bumps .new-badge down. (0.1.8) */
+    .rating-pill {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #111;
+      background: linear-gradient(180deg, #ffe27a 0%, #f5c518 100%);
+      padding: 2px 6px 2px 5px;
+      border-radius: var(--radius-xs);
+      line-height: 1;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+    .rating-pill .star {
+      width: 10px;
+      height: 10px;
+      fill: #111;
+      flex-shrink: 0;
+    }
+    /* When both rating + NEW are visible, push NEW down so the rating gets
+     * the prime corner. */
+    .new-badge.below-rating {
+      top: 28px;
+    }
+
     .duration-badge {
       position: absolute;
       bottom: 6px;
@@ -308,6 +341,8 @@ export class PosterStrip extends LitElement {
     const showNew = !this.continueMode && isNew(item, this.now);
     const meta = this.metaLine(item, inProgress);
     const durationBadge = this.durationBadge(item, inProgress);
+    const ratingLabel = formatImdbRating(item.imdbRating);
+    const newClass = ratingLabel ? 'new-badge below-rating' : 'new-badge';
 
     return html`
       <div
@@ -324,7 +359,8 @@ export class PosterStrip extends LitElement {
                 @error=${(): void => this.markBrokenPoster(item.posterUrl!)}
               />`
             : renderPlaceholder(item)}
-          ${showNew ? html`<span class="new-badge">NEW</span>` : null}
+          ${ratingLabel ? renderRatingPill(ratingLabel) : null}
+          ${showNew ? html`<span class=${newClass}>NEW</span>` : null}
           <watched-button
             .watched=${item.watched}
             .kind=${item.type}
@@ -380,6 +416,27 @@ export class PosterStrip extends LitElement {
     next.add(url);
     this.brokenPosters = next;
   }
+}
+
+/** Format an IMDb /10 rating for the pill. One decimal except at the 10.0
+ *  ceiling (where "10" reads better than "10.0"). Returns null when there's
+ *  nothing to render so the caller can skip the pill entirely. (0.1.8) */
+export function formatImdbRating(rating: number | null | undefined): string | null {
+  if (rating == null) return null;
+  if (!Number.isFinite(rating) || rating <= 0) return null;
+  if (rating >= 10) return '10';
+  return rating.toFixed(1);
+}
+
+/** Render the gold IMDb rating pill. Pass the pre-formatted label so callers
+ *  can early-out on null without going through the template. (0.1.8) */
+function renderRatingPill(label: string): unknown {
+  return html`<span class="rating-pill" aria-label=${`IMDb rating ${label} of 10`}>
+    <svg class="star" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2 L14.85 8.63 L22 9.27 L16.5 14.14 L18.18 21.02 L12 17.27 L5.82 21.02 L7.5 14.14 L2 9.27 L9.15 8.63 Z"></path>
+    </svg>
+    ${label}
+  </span>`;
 }
 
 /** Lit-html template form of the placeholder, used when posterUrl is null

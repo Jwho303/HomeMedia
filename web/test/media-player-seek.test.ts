@@ -2,6 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import '../src/components/media-player.js';
 import { MediaPlayer } from '../src/components/media-player.js';
 
+// hls.js doesn't run under happy-dom (no MSE), and the attach path would set
+// `this.error = 'Your browser does not support HLS playback.'`, replacing the
+// <video> element with the error div before tests can introspect it. Stub the
+// module to a no-op that satisfies isSupported() and the attach surface.
+vi.mock('hls.js', () => {
+  class HlsStub {
+    static isSupported(): boolean { return true; }
+    on(): void { /* no-op */ }
+    loadSource(): void { /* no-op */ }
+    attachMedia(): void { /* no-op */ }
+    destroy(): void { /* no-op */ }
+  }
+  return { default: HlsStub };
+});
+
 /**
  * HLS seek-math regression tests (0.1.7).
  *
@@ -51,8 +66,26 @@ describe('media-player HLS seek math (0.1.7)', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
       const u = url as string;
       if (u.startsWith('/api/playback/')) return mockJson({ position: 0, duration: 0, watched: false });
+      // Phase 4: HLS is the only path; the player bootstraps via /api/stream-meta
+      // and then preflights /api/hls/master.m3u8 to capture the session id header.
+      if (u.startsWith('/api/stream-meta/')) {
+        return mockJson({
+          relPath: 'X.mp4', absPath: '/m/X.mp4',
+          container: 'mp4', videoCodec: 'h264', audioCodec: 'aac',
+          durationSeconds: 0, audioStreams: [], subStreams: [], chapters: [], subs: [],
+        });
+      }
+      if (u.startsWith('/api/hls/')) {
+        return new Response('#EXTM3U\n', {
+          status: 200,
+          headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'x-hls-session-id': 'test-session' },
+        });
+      }
+      if (u.startsWith('/api/library')) return mockJson({ movies: [], series: [] });
+      if (u.startsWith('/api/series')) return mockJson({ series: { id: 0, episodes: [] }, episodes: [] });
       if (u.startsWith('/api/stream/')) return new Response('x', { status: 206 });
       if (u.startsWith('/api/subs-list/')) return mockJson({ subs: [] });
+      if (u.startsWith('/api/client-log')) return mockJson({}, 200);
       throw new Error(`unexpected ${u}`);
     });
   });
@@ -61,6 +94,12 @@ describe('media-player HLS seek math (0.1.7)', () => {
     const player = document.createElement('media-player') as MediaPlayer;
     player.relPath = 'X.mp4';
     document.body.appendChild(player);
+    // The HLS bootstrap awaits Promise.all([apiStreamMeta, apiPlaybackGet])
+    // before flipping `probing` off, so we need to drain microtasks twice
+    // after the macrotask flush for the probe to materialize and the
+    // <video> element to appear in the shadow DOM.
+    await player.updateComplete;
+    await flush();
     await player.updateComplete;
     await flush();
     await player.updateComplete;

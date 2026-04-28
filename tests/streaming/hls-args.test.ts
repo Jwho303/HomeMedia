@@ -221,13 +221,14 @@ describe('buildHlsArgs()', () => {
     expect(mapValues).toContain('0:a:2');
   });
 
-  it('burnSubStreamIndex on modern source switches vf to hwdownload+subtitles', () => {
+  it('text-sub burn-in on modern source uses hwdownload + subtitles= filter', () => {
     const { args } = buildHlsArgs(
       input({
         container: 'matroska,webm',
         videoCodec: 'hevc',
         audioCodec: 'aac',
         burnSubStreamIndex: 0,
+        burnSubTextBased: true,
         durationSeconds: 1200,
       }),
       CACHE,
@@ -237,6 +238,200 @@ describe('buildHlsArgs()', () => {
     expect(args[vfIdx + 1]).toContain('hwdownload');
     expect(args[vfIdx + 1]).toContain('subtitles=');
     expect(args[vfIdx + 1]).toContain(':si=0');
+    // Default text-sub path keeps -hwaccel cuda for video decode.
+    expect(args).toContain('-hwaccel');
+  });
+
+  // Image-sub burn-in (PGS / VobSub / DVB) requires a different filter
+  // chain because ffmpeg's `subtitles=` filter only handles text codecs.
+  // The route layer threads `burnSubTextBased=false` through to hls-args
+  // which switches to filter_complex + overlay. Without this branch the
+  // ffmpeg process spawns and immediately fails inside the filter graph
+  // with "Only text based subtitles are currently supported", the
+  // playlist never appears, and we wait 30s on `waitForPlaylist` before
+  // surfacing a 415 to the client.
+  describe('image-sub burn-in (overlay filter chain)', () => {
+    it('PGS burn-in on a modern HEVC source uses filter_complex + overlay, no -hwaccel cuda', () => {
+      const { args } = buildHlsArgs(
+        input({
+          container: 'matroska,webm',
+          videoCodec: 'hevc',
+          audioCodec: 'eac3',
+          burnSubStreamIndex: 0,
+          burnSubTextBased: false,
+          durationSeconds: 7095,
+        }),
+        CACHE,
+      );
+      // No -hwaccel: NVDEC can't decode PGS, and mixing CUDA video with a
+      // CPU sub stream confuses the auto-scaler.
+      expect(args).not.toContain('-hwaccel');
+      // -filter_complex appears with the overlay graph.
+      const fcIdx = args.indexOf('-filter_complex');
+      expect(fcIdx).toBeGreaterThan(-1);
+      expect(args[fcIdx + 1]).toBe('[0:v][0:s:0]overlay[outv]');
+      // -map [outv] for the labeled output.
+      const maps = args.reduce<string[]>((acc, a, i) => {
+        if (a === '-map') acc.push(args[i + 1] ?? '');
+        return acc;
+      }, []);
+      expect(maps).toContain('[outv]');
+      // No -vf — overlay is in filter_complex.
+      expect(args).not.toContain('-vf');
+      // NVENC encoder still runs.
+      expect(args).toContain('h264_nvenc');
+      // Audio still maps to default (0:a:0?) since audioStreamIndex omitted.
+      expect(maps).toContain('0:a:0?');
+    });
+
+    it('PGS burn-in respects audioStreamIndex when set', () => {
+      const { args } = buildHlsArgs(
+        input({
+          container: 'matroska,webm',
+          videoCodec: 'hevc',
+          audioCodec: 'eac3',
+          audioStreamIndex: 1,
+          burnSubStreamIndex: 0,
+          burnSubTextBased: false,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const maps = args.reduce<string[]>((acc, a, i) => {
+        if (a === '-map') acc.push(args[i + 1] ?? '');
+        return acc;
+      }, []);
+      expect(maps).toContain('[outv]');
+      expect(maps).toContain('0:a:1');
+    });
+
+    it('image-sub burn-in on a legacy AVI source preserves the Xvid bitstream filter', () => {
+      const { args } = buildHlsArgs(
+        input({
+          container: 'avi',
+          videoCodec: 'mpeg4',
+          audioCodec: 'mp3',
+          burnSubStreamIndex: 0,
+          burnSubTextBased: false,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const fcIdx = args.indexOf('-filter_complex');
+      expect(fcIdx).toBeGreaterThan(-1);
+      expect(args[fcIdx + 1]).toBe('[0:v][0:s:0]overlay[outv]');
+      // Xvid workaround flag is still present.
+      expect(args).toContain('-bsf:v');
+      const bsfIdx = args.indexOf('-bsf:v');
+      expect(args[bsfIdx + 1]).toBe('mpeg4_unpack_bframes');
+    });
+
+    it('image-sub burn-in on legacy TS keeps +genpts and uses overlay', () => {
+      const { args } = buildHlsArgs(
+        input({
+          container: 'mpegts',
+          videoCodec: 'mpeg2video',
+          audioCodec: 'ac3',
+          burnSubStreamIndex: 1,
+          burnSubTextBased: false,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const fcIdx = args.indexOf('-filter_complex');
+      expect(args[fcIdx + 1]).toBe('[0:v][0:s:1]overlay[outv]');
+      // No mpeg4 bitstream filter on the legacy-ts path.
+      expect(args).not.toContain('mpeg4_unpack_bframes');
+      // +genpts should be present.
+      const ffIdx = args.indexOf('-fflags');
+      expect(args[ffIdx + 1]).toBe('+genpts');
+    });
+
+    it('omitting burnSubTextBased defaults to the text-sub filter (back-compat)', () => {
+      // Before the route plumbs the flag through, callers may pass only
+      // burnSubStreamIndex. The pipeline must default to the text-sub
+      // path so we don't regress text-sub burn-in.
+      const { args } = buildHlsArgs(
+        input({
+          container: 'matroska,webm',
+          videoCodec: 'hevc',
+          audioCodec: 'aac',
+          burnSubStreamIndex: 0,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const vfIdx = args.indexOf('-vf');
+      expect(vfIdx).toBeGreaterThan(-1);
+      expect(args[vfIdx + 1]).toContain('subtitles=');
+      expect(args).not.toContain('-filter_complex');
+    });
+  });
+
+  // Burn-in regression coverage for path-escape edge cases that broke playback
+  // on Windows real-world libraries. The subtitles= filter wraps the path in
+  // single quotes; literal apostrophes in the path must be re-escaped, and
+  // backslashes must be normalized so the parser doesn't read them as escapes.
+  describe('burn-in subtitle path escaping', () => {
+    it("Windows backslashes in the absPath are normalized to forward slashes", () => {
+      const { args } = buildHlsArgs(
+        input({
+          absPath: 'D:\\Torrent\\Completed\\show\\ep.mkv',
+          container: 'matroska,webm',
+          videoCodec: 'hevc',
+          audioCodec: 'aac',
+          burnSubStreamIndex: 1,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const vfIdx = args.indexOf('-vf');
+      const vf = args[vfIdx + 1] ?? '';
+      // The colon after D: stays inside the single-quoted region — the parser
+      // doesn't see it as a filter-arg separator. Importantly: no backslashes
+      // in the inner content.
+      expect(vf).toContain("subtitles='D:/Torrent/Completed/show/ep.mkv':si=1");
+      expect(vf).not.toMatch(/[a-zA-Z]:\\\\/);
+    });
+
+    it("apostrophe in the path is re-escaped with the close-escape-reopen idiom", () => {
+      const { args } = buildHlsArgs(
+        input({
+          absPath: "/media/Show's Edit/ep.mkv",
+          container: 'matroska,webm',
+          videoCodec: 'hevc',
+          audioCodec: 'aac',
+          burnSubStreamIndex: 0,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const vfIdx = args.indexOf('-vf');
+      const vf = args[vfIdx + 1] ?? '';
+      // The literal apostrophe becomes '\'' inside the surrounding quotes —
+      // close, escaped apostrophe, reopen. Verify the sequence is intact.
+      expect(vf).toContain("'/media/Show'\\''s Edit/ep.mkv'");
+      expect(vf).toContain(':si=0');
+    });
+
+    it("filtergraph-special characters (`,`, `[`, `]`) inside the quoted path don't terminate args", () => {
+      const { args } = buildHlsArgs(
+        input({
+          absPath: '/media/show [2024]/Foo, Bar.mkv',
+          container: 'matroska,webm',
+          videoCodec: 'hevc',
+          audioCodec: 'aac',
+          burnSubStreamIndex: 2,
+          durationSeconds: 600,
+        }),
+        CACHE,
+      );
+      const vfIdx = args.indexOf('-vf');
+      const vf = args[vfIdx + 1] ?? '';
+      // Path stays intact within the single-quoted region. The downstream
+      // `:si=2` is the only filter-arg-level `:` outside the quotes.
+      expect(vf).toContain("subtitles='/media/show [2024]/Foo, Bar.mkv':si=2");
+    });
   });
 
   it('event playlist mode regardless of known duration', () => {

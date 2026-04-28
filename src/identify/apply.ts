@@ -17,6 +17,10 @@ export interface ApplyIdentity {
   genres?: string[] | null;
   /** Movie runtime in seconds; ignored for series. (0.1.3.2) */
   runtimeSeconds?: number | null;
+  /** IMDb /10 rating from OMDb's `imdbRating`. (0.1.8) */
+  imdbRating?: number | null;
+  /** IMDb vote count from OMDb's `imdbVotes`. (0.1.8) */
+  imdbVotes?: number | null;
 }
 
 export interface ApplyOptions {
@@ -76,6 +80,8 @@ function applyMovie(
       ? JSON.stringify(identity.genres)
       : null;
   const runtimeSeconds = identity.runtimeSeconds ?? null;
+  const imdbRating = identity.imdbRating ?? null;
+  const imdbVotes = identity.imdbVotes ?? null;
   let itemId: number;
   if (existing) {
     deps.db.raw
@@ -87,6 +93,8 @@ function applyMovie(
              confidence = ?, identification_json = ?,
              genres_json = COALESCE(?, genres_json),
              runtime_seconds = COALESCE(?, runtime_seconds),
+             imdb_rating = COALESCE(?, imdb_rating),
+             imdb_votes  = COALESCE(?, imdb_votes),
              scanned_at = ?
          WHERE id = ?`,
       )
@@ -102,6 +110,8 @@ function applyMovie(
         opts.identificationJson ?? null,
         genresJson,
         runtimeSeconds,
+        imdbRating,
+        imdbVotes,
         opts.scannedAt,
         existing.id,
       );
@@ -122,6 +132,8 @@ function applyMovie(
       identification_json: opts.identificationJson ?? null,
       genres_json: genresJson,
       runtime_seconds: runtimeSeconds,
+      imdb_rating: imdbRating,
+      imdb_votes: imdbVotes,
       mtime: opts.mtime,
       scanned_at: opts.scannedAt,
     });
@@ -150,6 +162,8 @@ async function applySeriesEpisode(
     identity.genres && identity.genres.length > 0
       ? JSON.stringify(identity.genres)
       : null;
+  const imdbRating = identity.imdbRating ?? null;
+  const imdbVotes = identity.imdbVotes ?? null;
   if (series) {
     deps.db.raw
       .prepare(
@@ -160,6 +174,8 @@ async function applySeriesEpisode(
              confidence = MAX(COALESCE(confidence, 0), ?),
              identification_json = ?,
              genres_json = COALESCE(?, genres_json),
+             imdb_rating = COALESCE(?, imdb_rating),
+             imdb_votes  = COALESCE(?, imdb_votes),
              scanned_at = ?
          WHERE id = ?`,
       )
@@ -174,6 +190,8 @@ async function applySeriesEpisode(
         opts.confidence,
         opts.identificationJson ?? null,
         genresJson,
+        imdbRating,
+        imdbVotes,
         opts.scannedAt,
         series.id,
       );
@@ -192,6 +210,8 @@ async function applySeriesEpisode(
       confidence: opts.confidence,
       identification_json: opts.identificationJson ?? null,
       genres_json: genresJson,
+      imdb_rating: imdbRating,
+      imdb_votes: imdbVotes,
       mtime: 0,
       scanned_at: opts.scannedAt,
     });

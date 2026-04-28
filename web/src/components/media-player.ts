@@ -6,17 +6,12 @@ import {
   apiPlaybackGet,
   apiPlaybackPost,
   apiSeries,
-  apiStreamDiagnostics,
   apiStreamMeta,
-  apiStreamProbe,
-  apiSubsList,
   embeddedSubsUrl,
-  EmptyFileError,
   hlsBeaconUrl,
+  hlsTouch,
   hlsPlaylistUrl,
-  resolveHlsPlayerFlag,
   ShareOfflineError,
-  streamUrl,
   subsUrl,
 } from '../api.js';
 import { getConsoleBuffer } from '../console-buffer.js';
@@ -24,7 +19,6 @@ import type {
   AudioStream,
   Chapter,
   LibraryItem,
-  StreamDiagnostics,
   StreamProbe,
   SubInfo,
   SubStream,
@@ -60,18 +54,6 @@ import {
   iconInfo,
   iconBug,
 } from './icons.js';
-
-// v6: decision logic changed — AC3/EAC3/DTS audio is now `remux` (transcoded
-// to AAC inline), so old `external` cache entries for those files are stale.
-// v7: decide() promoted Xvid / MPEG-2 / VC-1 / etc. to 'remux' (with the
-// preferAccel hint), so v6 cache entries that said `external` for these are
-// stale. Also adds the preferAccel field to the cached shape.
-// v8: 0.1.4.3 — probe now carries audioStreams/subStreams/chapters; older
-// blobs lack the new fields, so bump the prefix to force a fresh probe.
-// v9: 0.1.4.3 follow-up — direct-stream probes now also fetch full track +
-// chapter info via /api/stream-diagnostics; v8 entries cached `{decision:'direct'}`
-// without those fields and are stale.
-const PROBE_CACHE_PREFIX = 'homemedia.streamProbe.v9:';
 
 /** sessionStorage prefix for the per-file sticky audio-track choice. The value
  *  is the chosen `audioIndex` (local within audio streams). (0.1.4.3) */
@@ -154,37 +136,9 @@ export function describeSubStream(s: SubStream): string {
   return `${lang}${tail}${burn}`;
 }
 
-function readCachedProbe(relPath: string): StreamProbe | null {
-  try {
-    const raw = sessionStorage.getItem(PROBE_CACHE_PREFIX + relPath);
-    if (!raw) return null;
-    return JSON.parse(raw) as StreamProbe;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedProbe(relPath: string, probe: StreamProbe): void {
-  try {
-    sessionStorage.setItem(PROBE_CACHE_PREFIX + relPath, JSON.stringify(probe));
-  } catch {
-    /* sessionStorage not available — fine, just skip caching */
-  }
-}
-
 const FLUSH_INTERVAL_MS = 10_000;
 const WATCHED_RATIO = 0.9;
 const IDLE_TIMEOUT_MS = 3_000;
-/** How long the stream can sit without producing bytes before we treat it as
- *  failed and fall through the playback strategy chain. The clock resets on
- *  every <video> progress event; only a true stall trips it.
- *
- *  A "metadata-load timeout" of 8s used to live here. That measured the wrong
- *  thing — Xvid → H.264 NVENC startup can spend 4-5s on demuxer probe + NVENC
- *  init *while bytes ARE arriving in the browser*, and tripping the timeout
- *  killed perfectly healthy streams. Stall detection (no progress for N seconds)
- *  catches dead streams without false positives on slow-but-progressing ones. */
-const STREAM_STALL_TIMEOUT_MS = 15_000;
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 
 /** Strip directories + the file extension to get a human-ish title from a path.
@@ -560,6 +514,30 @@ export class MediaPlayer extends LitElement {
       cursor: pointer;
     }
     .scrubber .chapter-tick:hover { background: #fff; }
+    /* Chapter hover tooltip — replaces the native title= attribute with a
+     * styled popover that matches the rest of the player chrome. Anchored
+     * above the hovered tick, two lines: title + start timestamp. */
+    .scrubber .chapter-tooltip {
+      position: absolute;
+      bottom: calc(100% + 10px);
+      transform: translateX(-50%);
+      background: rgba(20, 20, 20, 0.95);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 6px;
+      padding: 6px 10px;
+      pointer-events: none;
+      white-space: nowrap;
+      font-size: 12px;
+      line-height: 1.35;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      z-index: 5;
+    }
+    .scrubber .chapter-tooltip .ts {
+      color: rgba(255, 255, 255, 0.6);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
     .scrubber input[type='range'] {
       position: absolute;
       left: 0;
@@ -801,6 +779,31 @@ export class MediaPlayer extends LitElement {
       color: var(--text-secondary);
     }
 
+    /* Buffering spinner — rendered as an overlay above the video element
+     * while hls.js is fetching segments and the video element fired the
+     * "waiting" event without a paired "playing" yet. pointer-events: none
+     * so the click region under it (toggle play/pause) keeps working. */
+    .buffer-spinner {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 4;
+    }
+    .buffer-spinner .ring {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.18);
+      border-top-color: rgba(255, 255, 255, 0.85);
+      animation: hm-spin 0.85s linear infinite;
+    }
+    @keyframes hm-spin {
+      to { transform: rotate(360deg); }
+    }
+
     /* Native-controls escape-hatch keeps the layout sane in tests/debug. */
     .native-stage video { object-fit: contain; }
   `;
@@ -814,13 +817,23 @@ export class MediaPlayer extends LitElement {
   @state() private muted = volumePrefs.muted;
   @state() private volume = volumePrefs.volume;
   @state() private bufferedPct = 0;
+  /** Chapter currently under the cursor (mouseenter/leave on a tick).
+   *  Drives the rich chapter-tooltip overlay; null hides it. (Phase 4) */
+  @state() private hoveredChapter: Chapter | null = null;
+  /** True while the <video> element is waiting on data (hls.js fetching the
+   *  next segment, scrub into an unbuffered region, etc.). Drives the
+   *  spinner overlay. Set on `waiting`, cleared on `playing` / `canplay` /
+   *  `seeked`. Debounced by ~200ms in the render to avoid flicker on brief
+   *  network blips. */
+  @state() private buffering = false;
+  /** Wallclock millis when `buffering` was last flipped to true. The render
+   *  hides the spinner until 200ms have elapsed so a 50ms stall doesn't
+   *  flash a spinner. */
+  @state() private bufferingSince = 0;
   @state() private error: string | null = null;
   @state() private nativeControls = false;
   @state() private probe: StreamProbe | null = null;
   @state() private probing = false;
-  /** 0.1.4.2 — diagnostic dump from `/api/stream-diagnostics/:relPath`.
-   *  Lazily fetched when the info popover opens. */
-  @state() private diagnostics: StreamDiagnostics | null = null;
   /** Ring buffer of the last 5 playback failures (newest first). Populated by
    *  `handlePlaybackFailure`; surfaced in the diagnostic overlay. */
   @state() private failureLog: Array<{
@@ -835,8 +848,6 @@ export class MediaPlayer extends LitElement {
    *  order so a post-failure report has full context. ~200 entries deep,
    *  oldest dropped. Drained into the report payload as `traceLog`. */
   private traceLog: Array<{ at: number; tag: string; data?: Record<string, unknown> }> = [];
-  /** True iff the ffmpeg-args section in the info popover is expanded. */
-  @state() private ffmpegArgsExpanded = false;
   /** Report button state. Drives the icon flash so the user knows the POST
    *  landed (or didn't) without an intrusive toast. */
   @state() private reportStatus: 'idle' | 'sending' | 'sent' | 'failed' = 'idle';
@@ -913,25 +924,24 @@ export class MediaPlayer extends LitElement {
    *  redundant attaches when several `@state` fields change in quick
    *  succession but the resulting playlist URL is the same. */
   private hlsLastAttachUrl: string | null = null;
+  /** Heartbeat interval handle. Pings the server every ~20s while playing
+   *  so the idle GC doesn't reap a session whose client has buffered
+   *  enough to skip segment fetches for a minute or more.
+   *
+   *  Lifecycle:
+   *    - armed   on `playing` (when hlsSessionId is known)
+   *    - cleared on `pause`, on session swap, on disconnectedCallback
+   *    - 410 response → `respawnHlsSession()` to recover transparently
+   */
+  private hlsHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** The session id the active heartbeat is pinging. We capture it so a
+   *  late-arriving 410 from a *previous* session's heartbeat can't trigger
+   *  a respawn against the current one. */
+  private hlsHeartbeatSessionId: string | null = null;
   /** 0.1.6 — coalesces the burst of `updated()` calls that fire when the
    *  HLS bootstrap completes. Without this we'd issue 15+ identical
    *  master.m3u8 fetches for a single mount. */
   private hlsAttachScheduled = false;
-  /** True once we've already tried NVENC for this path. Prevents infinite retry. */
-  private nvencTried = false;
-  /** Stall watchdog. Set when the player is waiting for the stream to make
-   *  progress; cleared once metadata loads OR the user dismisses the player.
-   *  Re-armed on every `progress` event so a slow-but-progressing stream
-   *  doesn't trip it. */
-  private streamStallTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Silent-decode watchdog. Some browser/codec combos (notably HEVC on
-   *  Chromium-on-Mac without VideoToolbox MSE support) open the stream and
-   *  play audio cleanly but never decode video — no `error` event fires, so
-   *  the normal fallback chain never runs. We notice by comparing the video
-   *  element's reported duration against the probe's known duration a few
-   *  seconds after metadata loads; if the browser thinks the stream is far
-   *  shorter than it actually is, that's the symptom. */
-  private silentDecodeTimer: ReturnType<typeof setTimeout> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private bufferedRaf: number | null = null;
   private bufferedLastTick = 0;
@@ -958,21 +968,10 @@ export class MediaPlayer extends LitElement {
     this.persister = new PlaybackPersister(this.relPath);
     this.trace('connectedCallback', { relPath: this.relPath });
     void this.fetchResume();
-    // 0.1.6 D13 — decide which player code path to take, once per mount.
-    // The cached flag is populated by <share-banner>'s status poll (which
-    // fires on app boot). resolveHlsPlayerFlag falls through to a fetch if
-    // not cached — happens when the player is the first thing the app
-    // touches (deep link, etc.).
-    void resolveHlsPlayerFlag().then((on) => {
-      this.trace('resolveHlsPlayerFlag', { hlsPlayer: on });
-      if (on) {
-        this.useHls = true;
-        this.playMode = 'hls';
-        void this.runHlsBootstrap();
-      } else {
-        void this.runPreProbe();
-      }
-    });
+    // Phase 4 (post-0.1.6): HLS is the only player path.
+    this.useHls = true;
+    this.playMode = 'hls';
+    void this.runHlsBootstrap();
     void this.resolveTitleSource();
     document.addEventListener('visibilitychange', this.onVisibilityChange);
     document.addEventListener('fullscreenchange', this.onFullscreenChange);
@@ -1047,9 +1046,7 @@ export class MediaPlayer extends LitElement {
           this.hlsInstance = null;
         }
         this.hlsLastAttachUrl = null;
-        this.playMode = this.useHls ? 'hls' : 'direct';
-        this.nvencTried = false;
-        this.remuxTried = false;
+        this.playMode = 'hls';
         this.streamOffset = 0;
         this.seeking = false;
         this.pendingSeek = null;
@@ -1060,15 +1057,10 @@ export class MediaPlayer extends LitElement {
         this.persister = new PlaybackPersister(this.relPath);
         this.movieMeta = null;
         this.libraryFetchedFor = null;
-        this.diagnostics = null;
         this.failureLog = [];
         this.autoReportedExternalFor = null;
         void this.fetchResume();
-        if (this.useHls) {
-          void this.runHlsBootstrap();
-        } else {
-          void this.runPreProbe();
-        }
+        void this.runHlsBootstrap();
         void this.resolveTitleSource();
       }
     }
@@ -1146,115 +1138,14 @@ export class MediaPlayer extends LitElement {
     }, IDLE_TIMEOUT_MS);
   };
 
-  // ---------- stall watchdog ----------
-
-  /** Arm or re-arm the stall watchdog. Called on `loadstart` and on every
-   *  `progress` event from <video>; the latter is what keeps slow-but-healthy
-   *  streams alive (each chunk arriving resets the clock). */
-  private kickStallTimer(): void {
-    if (this.streamStallTimer !== null) clearTimeout(this.streamStallTimer);
-    this.streamStallTimer = setTimeout(() => {
-      this.streamStallTimer = null;
-      const v = this.videoEl;
-      // HAVE_METADATA = 1; if we already passed that, the stream is fine —
-      // any later stalls are normal "buffering" and the browser handles them.
-      if (!v || v.readyState >= 1) return;
-      this.recordFailure('stream-stall');
-      this.handlePlaybackFailure('stream-stall');
-    }, STREAM_STALL_TIMEOUT_MS);
-  }
-
-  private clearStallTimer(): void {
-    if (this.streamStallTimer !== null) {
-      clearTimeout(this.streamStallTimer);
-      this.streamStallTimer = null;
-    }
-  }
-
-  /** Arm the silent-decode watchdog. Only meaningful for ffmpeg-piped modes
-   *  (remux/nvenc) where the probe carries the true source duration; direct
-   *  range-served files don't need it. Skipped when the source is short
-   *  (<60s) — the watchdog's signal-to-noise breaks down at that scale.
-   *
-   *  Signal: `videoEl.videoWidth === 0` while audio is advancing. A healthy
-   *  decode populates `videoWidth` to the source resolution as soon as the
-   *  first frame paints; the silent-decode pathology (audio plays, video
-   *  never decodes — HEVC on Chromium without VideoToolbox, etc.) leaves
-   *  `videoWidth` at 0 forever. Pairing that with `currentTime` advance
-   *  ensures we don't trip on genuinely paused / not-yet-started streams.
-   *  Buffered-progress was the prior signal but was too noisy: slow ramps
-   *  from NVENC at 1080p look like "stuck" early on. */
-  private armSilentDecodeWatchdog(): void {
-    this.clearSilentDecodeTimer();
-    if (this.playMode !== 'remux' && this.playMode !== 'nvenc') return;
-    const probeDur = this.probe?.durationSeconds ?? 0;
-    if (probeDur < 60) return;
-
-    const SILENT_DECODE_POLL_MS = 2_000;
-    /** Minimum currentTime advance before we trust audio is really moving. */
-    const MIN_AUDIO_ADVANCE_S = 3;
-    /** Max wait from arm time before we stop polling. */
-    const ABSOLUTE_CAP_MS = 60_000;
-    /** Once these conditions hold simultaneously for this long, trip:
-     *  videoWidth === 0 AND currentTime has advanced ≥ MIN_AUDIO_ADVANCE_S
-     *  since arm. Padding past the audio-advance threshold so we don't
-     *  trip the moment audio crosses 3s (still possibly within startup). */
-    const TRIP_AFTER_MS = 15_000;
-
-    const startedAt = Date.now();
-    const startCurrentTime = this.videoEl?.currentTime ?? 0;
-
-    const poll = (): void => {
-      this.silentDecodeTimer = null;
-      const v = this.videoEl;
-      if (!v) return;
-
-      const now = Date.now();
-      const elapsedMs = now - startedAt;
-      const audioAdvance = v.currentTime - startCurrentTime;
-      const videoWidth = v.videoWidth | 0;
-
-      // The kill condition: we've waited long enough AND audio has clearly
-      // started AND no video frame ever populated videoWidth. That means
-      // the demuxer accepted the stream but the decoder never produced a
-      // frame — exactly the "audio plays, screen black" pathology.
-      if (
-        elapsedMs >= TRIP_AFTER_MS &&
-        audioAdvance >= MIN_AUDIO_ADVANCE_S &&
-        videoWidth === 0
-      ) {
-        // eslint-disable-next-line no-console
-        console.warn('[media-player] silent decode failure', {
-          playMode: this.playMode,
-          videoCodec: this.probe?.videoCodec,
-          videoWidth,
-          videoHeight: v.videoHeight,
-          audioAdvance,
-          elapsedMs,
-          streamOffset: this.streamOffset,
-        });
-        this.recordFailure('silent-decode');
-        this.handlePlaybackFailure('silent-decode');
-        return;
-      }
-
-      // Once a video frame paints, we're done — the decoder works for this
-      // stream, no point polling further.
-      if (videoWidth > 0) return;
-
-      if (elapsedMs >= ABSOLUTE_CAP_MS) return;
-      this.silentDecodeTimer = setTimeout(poll, SILENT_DECODE_POLL_MS);
-    };
-
-    this.silentDecodeTimer = setTimeout(poll, SILENT_DECODE_POLL_MS);
-  }
-
-  private clearSilentDecodeTimer(): void {
-    if (this.silentDecodeTimer !== null) {
-      clearTimeout(this.silentDecodeTimer);
-      this.silentDecodeTimer = null;
-    }
-  }
+  // ---------- legacy stall + silent-decode watchdogs (HLS Phase 4 cleanup) ----------
+  // hls.js owns recovery for transient errors under the HLS-only architecture;
+  // these are kept as no-ops so existing call sites compile without disrupting
+  // unrelated wiring. Will be removed in a follow-up sweep.
+  private kickStallTimer(): void { /* no-op */ }
+  private clearStallTimer(): void { /* no-op */ }
+  private armSilentDecodeWatchdog(): void { /* no-op */ }
+  private clearSilentDecodeTimer(): void { /* no-op */ }
 
   private probedFor: string | null = null;
 
@@ -1308,59 +1199,6 @@ export class MediaPlayer extends LitElement {
    *  `preferAccel` hint: when the source video codec has no chance of
    *  decoding in any browser (Xvid, MPEG-2, VC-1, etc.) the server tells
    *  us to start in NVENC mode and skip the wasted remux attempt. */
-  private initialPlayMode(probe: StreamProbe): 'direct' | 'remux' | 'nvenc' | 'external' {
-    if (probe.decision === 'remux' && probe.preferAccel === 'nvenc' && probe.accel?.nvenc) {
-      // Mark NVENC as already-tried so a later <video> error doesn't try to
-      // re-trigger the same path it's already on.
-      this.nvencTried = true;
-      return 'nvenc';
-    }
-    return probe.decision;
-  }
-
-  private async runPreProbe(): Promise<void> {
-    if (this.probedFor === this.relPath) return; // already probed (or in flight) for this path
-    this.probedFor = this.relPath;
-
-    const cached = readCachedProbe(this.relPath);
-    if (cached) {
-      this.probe = cached;
-      this.subs = cached.subs;
-      this.nvencTried = false;
-      this.remuxTried = false;
-      this.playMode = this.initialPlayMode(cached);
-      this.applyStickyPrefs(cached);
-      this.applyResumeOffset();
-      if (cached.decision === 'direct') {
-        void this.fetchDirectSubs();
-      }
-      return;
-    }
-    this.probing = true;
-    try {
-      const probe = await apiStreamProbe(this.relPath);
-      this.probe = probe;
-      this.subs = probe.subs;
-      this.nvencTried = false;
-      this.remuxTried = false;
-      this.playMode = this.initialPlayMode(probe);
-      this.applyStickyPrefs(probe);
-      this.applyResumeOffset();
-      writeCachedProbe(this.relPath, probe);
-      if (probe.decision === 'direct') void this.fetchDirectSubs();
-    } catch (err) {
-      if (err instanceof ShareOfflineError) {
-        this.error = 'Stream unavailable — desktop appears to be offline. Reconnect from the banner above.';
-      } else if (err instanceof EmptyFileError) {
-        this.error = 'This file is empty (0 bytes) — likely an incomplete download. Finish the download or remove the file, then re-scan the library.';
-      } else {
-        this.error = `Stream unavailable: ${(err as Error).message}`;
-      }
-    } finally {
-      this.probing = false;
-    }
-  }
-
   /** 0.1.6 — fetch read-only stream metadata (audio streams, sub streams,
    *  chapters, sibling subs) for the HLS player UI. Stuffs the data into
    *  the existing `probe` slot so the popover/scrubber rendering paths
@@ -1533,11 +1371,11 @@ export class MediaPlayer extends LitElement {
         try { await r.text(); } catch { /* ignore */ }
       } else if (r.status === 415) {
         const body = (await r.json().catch(() => ({}))) as { decision?: string; absPath?: string; error?: string };
-        // 0.1.7 — graceful recovery: when the burn-in target is image-based,
-        // ffmpeg's filter graph fails. The server pre-flight rejects with
-        // `burn_image_sub_unsupported`; we drop the sticky pref + retry
-        // without burn-in instead of forcing the user into the external
-        // player just because of a sub track they once picked.
+        // Defensive fallback for older server bundles: pre-Phase-4-followup
+        // servers rejected image-sub burn-in with `burn_image_sub_unsupported`.
+        // Newer servers handle it via filter_complex overlay (no 415 thrown).
+        // Kept so that during a server roll-back we degrade gracefully to
+        // unburned playback instead of forcing the user into external.
         if (body.error === 'burn_image_sub_unsupported' && this.activeBurnSubIndex !== null) {
           if (this.hlsAttachToken !== token) return;
           this.trace('attachHlsToVideo.burnImageRetry', { droppedBurnIndex: this.activeBurnSubIndex });
@@ -1696,6 +1534,25 @@ export class MediaPlayer extends LitElement {
             }
           }
           this.trace(`hls.${name.replace(/^hls/, '').toLowerCase()}`, slim);
+          // Recover transparently when the server tells us a segment is
+          // gone. This is the same condition the heartbeat catches via
+          // /touch → 410, except surfaced through hls.js's own retry
+          // path: a fragment fetch returned 404 because the session
+          // (and its on-disk segments) were GCed.
+          //
+          // Only react to *fatal* network errors — non-fatal ones are
+          // hls.js retries we should let run their course. The fatal
+          // bit is true once hls.js has decided to give up on this
+          // fragment / level.
+          if (
+            name === 'hlsError' &&
+            slim.fatal === true &&
+            (slim.details === 'fragLoadError' || slim.details === 'levelLoadError') &&
+            sessionId &&
+            sessionId === this.hlsSessionId
+          ) {
+            this.respawnHlsSession(`hlsError-${String(slim.details)}`);
+          }
         });
       } catch { /* hls.js shape mismatch — best-effort */ }
     }
@@ -1705,6 +1562,7 @@ export class MediaPlayer extends LitElement {
    *  on disconnect / pagehide and before respawning the session for a new
    *  audio/sub selection. */
   private fireHlsBeacon(): void {
+    this.stopHlsHeartbeat();
     const id = this.hlsSessionId;
     if (!id) return;
     try {
@@ -1713,6 +1571,96 @@ export class MediaPlayer extends LitElement {
       }
     } catch { /* best-effort */ }
     this.hlsSessionId = null;
+  }
+
+  /** Heartbeat — periodically POSTs to /touch so the server's idle GC
+   *  doesn't reap a session whose client has buffered enough to stop
+   *  fetching segments. Idempotent: re-arming with the same session is
+   *  a no-op; a different session resets the interval.
+   *
+   *  Fires once immediately so a play-after-long-pause discovers a stale
+   *  session in ~100ms instead of waiting 20s for the next tick. The
+   *  first heartbeat is the cheapest possible 410 detector.
+   */
+  private armHlsHeartbeat(): void {
+    const id = this.hlsSessionId;
+    if (!id) return;
+    if (this.hlsHeartbeatTimer !== null && this.hlsHeartbeatSessionId === id) return;
+    this.stopHlsHeartbeat();
+    this.hlsHeartbeatSessionId = id;
+    // 20s — well under the 5-minute server-side idle threshold but well
+    // over the typical playback rhythm so we don't generate noise on
+    // sessions whose hls.js is actively fetching segments anyway.
+    const HEARTBEAT_MS = 20_000;
+    this.hlsHeartbeatTimer = setInterval(() => {
+      void this.fireHlsHeartbeat();
+    }, HEARTBEAT_MS);
+    this.trace('hls.heartbeat.armed', { sessionId: id, intervalMs: HEARTBEAT_MS });
+    // Fire one immediately so a play-after-long-pause hits 410 fast.
+    void this.fireHlsHeartbeat();
+  }
+
+  private stopHlsHeartbeat(): void {
+    if (this.hlsHeartbeatTimer !== null) {
+      clearInterval(this.hlsHeartbeatTimer);
+      this.hlsHeartbeatTimer = null;
+    }
+    this.hlsHeartbeatSessionId = null;
+  }
+
+  private async fireHlsHeartbeat(): Promise<void> {
+    const id = this.hlsHeartbeatSessionId;
+    if (!id || id !== this.hlsSessionId) {
+      // Stale tick — the session swapped between schedule and fire. Drop it.
+      return;
+    }
+    const outcome = await hlsTouch(id);
+    // While the request was in flight the active session may have changed
+    // (audio swap, scrub-restart, episode hop). Don't react to a stale
+    // outcome.
+    if (id !== this.hlsSessionId) return;
+    if (outcome === 'gone') {
+      this.trace('hls.heartbeat.gone', { sessionId: id });
+      this.respawnHlsSession('heartbeat-410');
+    } else if (outcome === 'error') {
+      // Network blip etc. — ignore. The next tick will retry, and a real
+      // outage shows up as the segment-404 path which also triggers a
+      // respawn.
+      this.trace('hls.heartbeat.error', { sessionId: id });
+    }
+  }
+
+  /** Recover from a server-side session loss (idle GC, server restart,
+   *  segment 404) by tearing down the local hls.js instance and forcing
+   *  a fresh attach at the current playback position. The streamOffset
+   *  is set from `<video>.currentTime` so ffmpeg respawns near where the
+   *  user is, not from the start. */
+  private respawnHlsSession(reason: string): void {
+    const v = this.videoEl;
+    const resumeAt = v ? this.absoluteTime(v) : this.currentTime;
+    this.trace('hls.respawn', { reason, sessionId: this.hlsSessionId, resumeAt });
+    // The attach token bump invalidates any in-flight fetch from the dying
+    // session before we destroy the hls.js instance.
+    this.hlsAttachToken++;
+    this.stopHlsHeartbeat();
+    if (this.hlsInstance) {
+      try { this.hlsInstance.destroy(); } catch { /* ignore */ }
+      this.hlsInstance = null;
+    }
+    // Don't fire the beacon — the server already considers this session
+    // gone (or it doesn't exist). A POST to /delete on a missing session
+    // is a 204 no-op but it's still wasted work.
+    this.hlsSessionId = null;
+    this.hlsLastAttachUrl = null;
+    // Seed the new session at the current position. The HLS attach path
+    // builds its URL from streamOffset.
+    if (resumeAt > 0) {
+      this.streamOffset = Math.max(0, Math.floor(resumeAt));
+      this.currentTime = resumeAt;
+    }
+    // updated() will see streamOffset / probe / playMode haven't changed
+    // structurally, but hlsLastAttachUrl is null so attachHls will refire.
+    this.scheduleHlsAttach();
   }
 
   /** Restore the per-file sticky audio + subtitle selection from sessionStorage,
@@ -1765,43 +1713,6 @@ export class MediaPlayer extends LitElement {
         }
       }
     }
-  }
-
-  private async fetchDirectSubs(): Promise<void> {
-    // 0.1.4.3 — for direct streams the 200-OK pre-probe doesn't carry
-    // audioStreams / subStreams / chapters; the 415 body that the player
-    // gets for remux/external sources does. Fetch them via the diagnostics
-    // endpoint instead so the audio popover, embedded-sub picker, and
-    // chapter ticks all have data to render against.
-    const [subsResult, diagResult] = await Promise.allSettled([
-      apiSubsList(this.relPath),
-      apiStreamDiagnostics(this.relPath),
-    ]);
-    const subs = subsResult.status === 'fulfilled' ? subsResult.value : [];
-    const diag = diagResult.status === 'fulfilled' ? diagResult.value : null;
-    if (!this.probe) return;
-    const next: StreamProbe = { ...this.probe };
-    if (subs.length > 0) {
-      next.subs = subs;
-      this.subs = subs;
-    }
-    if (diag) {
-      const p = diag.probe;
-      if (p.container) next.container = p.container;
-      if (p.videoCodec) next.videoCodec = p.videoCodec;
-      if (p.audioCodec) next.audioCodec = p.audioCodec;
-      if (typeof p.durationSeconds === 'number' && p.durationSeconds > 0) {
-        next.durationSeconds = p.durationSeconds;
-      }
-      if (p.audioStreams && p.audioStreams.length > 0) next.audioStreams = p.audioStreams;
-      if (p.subStreams && p.subStreams.length > 0) next.subStreams = p.subStreams;
-      if (p.chapters && p.chapters.length > 0) next.chapters = p.chapters;
-    }
-    this.probe = next;
-    writeCachedProbe(this.relPath, next);
-    // Re-apply sticky prefs now that audioStreams / subStreams are known.
-    this.applyStickyPrefs(next);
-    this.requestUpdate();
   }
 
   private async fetchResume(): Promise<void> {
@@ -1932,28 +1843,16 @@ export class MediaPlayer extends LitElement {
     this.resumed = true;
   }
 
-  /** Build the `<video src>` for the current playMode + streamOffset. */
+  /** Build the `<video src>` URL — always the HLS playlist under the
+   *  Phase-4 single-path architecture. The active audio track, burn-in
+   *  subtitle, and resume offset all ride as query params on the
+   *  /api/hls/master.m3u8 URL. */
   private buildStreamSrc(): string {
-    const base = streamUrl(this.relPath);
-    const params = new URLSearchParams();
-    if (this.playMode === 'nvenc') params.set('accel', 'nvenc');
-    else if (this.playMode === 'remux') params.set('remux', 'true');
-    if (this.streamOffset > 0 && (this.playMode === 'remux' || this.playMode === 'nvenc')) {
-      params.set('start', String(Math.floor(this.streamOffset)));
-    }
-    // 0.1.4.3 — audio-track override and burn-in subtitle. The route
-    // transparently upgrades a `direct` source to a remux when `audio=` is
-    // set, so we send the param even on direct-mode plays.
-    if (this.activeAudioIndex !== null && (this.playMode === 'remux' || this.playMode === 'nvenc' || this.playMode === 'direct')) {
-      params.set('audio', String(this.activeAudioIndex));
-      // Direct → remux upgrade so the override is honored.
-      if (this.playMode === 'direct') params.set('remux', 'true');
-    }
-    if (this.activeBurnSubIndex !== null) {
-      params.set('burnSub', String(this.activeBurnSubIndex));
-    }
-    const qs = params.toString();
-    return qs ? `${base}?${qs}` : base;
+    const opts: import('../api.js').HlsUrlOpts = {};
+    if (this.streamOffset > 0) opts.startSeconds = this.streamOffset;
+    if (this.activeAudioIndex !== null) opts.audioStreamIndex = this.activeAudioIndex;
+    if (this.activeBurnSubIndex !== null) opts.burnSubStreamIndex = this.activeBurnSubIndex;
+    return hlsPlaylistUrl(this.relPath, opts);
   }
 
   private onTimeUpdate = (): void => {
@@ -1973,10 +1872,6 @@ export class MediaPlayer extends LitElement {
   };
 
   private onProgress = (): void => {
-    // Bytes are arriving — reset the stall watchdog. Done eagerly (not in the
-    // throttled rAF below) so even a slow stream that hasn't loaded metadata
-    // yet but IS making progress doesn't trip the watchdog.
-    if (this.streamStallTimer !== null) this.kickStallTimer();
     // Throttle the buffered-range update to ~30fps via rAF + timestamp gate.
     if (this.bufferedRaf !== null) return;
     this.bufferedRaf = requestAnimationFrame(() => {
@@ -2052,9 +1947,38 @@ export class MediaPlayer extends LitElement {
     this.trace(`video.${e.type}`, this.playerSnapshot());
   };
 
+  /** Buffering spinner control. The <video> element fires `waiting` when
+   *  it dropped below HAVE_FUTURE_DATA — typical causes: hls.js still
+   *  fetching the next segment, scrub into unbuffered region, network
+   *  blip. We flip the buffering flag (debounced in the render to ~200ms
+   *  so brief stalls don't flicker the spinner). */
+  private onBufferingStart = (e: Event): void => {
+    if (!this.buffering) {
+      this.buffering = true;
+      this.bufferingSince = Date.now();
+    }
+    this.trace(`video.${e.type}`, this.playerSnapshot());
+  };
+
+  /** Spinner clear. `playing` fires when playback (re)starts after a stall;
+   *  `canplay`/`canplaythrough` cover post-seek and initial-load resumes.
+   *  `seeked` covers the case where a seek lands in already-buffered data
+   *  and produces no `waiting` either side. */
+  private onBufferingEnd = (e: Event): void => {
+    if (this.buffering) {
+      this.buffering = false;
+      this.bufferingSince = 0;
+    }
+    this.trace(`video.${e.type}`, this.playerSnapshot());
+  };
+
   private onPlay = (): void => {
     this.paused = false;
     this.trace('video.play', this.playerSnapshot());
+    // Heartbeat is the primary "session is alive" signal; arm it as soon
+    // as playback starts (the session id was set by the HLS attach right
+    // before this fired).
+    this.armHlsHeartbeat();
   };
   private onPause = (): void => {
     this.paused = true;
@@ -2063,6 +1987,10 @@ export class MediaPlayer extends LitElement {
     if (v && this.persister && this.duration > 0) {
       this.persister.flushNow(this.absoluteTime(v), this.duration);
     }
+    // Stop pinging while the user is paused — segment fetches stop too,
+    // but the heartbeat would otherwise keep the session alive forever
+    // for a paused tab. The 5-minute idle GC will reap it cleanly.
+    this.stopHlsHeartbeat();
   };
 
   private onEnded = (): void => {
@@ -2181,66 +2109,17 @@ export class MediaPlayer extends LitElement {
     this.failureLog = [entry, ...this.failureLog].slice(0, 5);
   }
 
-  /** Track whether we tried plain remux too (separate from nvencTried so the
-   *  fallback chain works in either entry order: nvenc-first via preferAccel
-   *  can still fall back to remux, or remux-first can fall forward to nvenc). */
-  private remuxTried = false;
-
-  /** Drives the playback fallback chain. The chain is order-agnostic — wherever
-   *  we are now, try the OTHER strategy if we haven't yet, else go external. */
-  private handlePlaybackFailure(reason: 'video-error' | 'stream-stall' | 'silent-decode'): void {
-    this.clearStallTimer();
-    this.clearSilentDecodeTimer();
-
+  /** Surface a playback failure. Under HLS the player no longer tries
+   *  alternate strategies — hls.js owns recovery for transient errors;
+   *  unrecoverable failures land here and present an error message. */
+  private handlePlaybackFailure(reason: 'video-error'): void {
     // eslint-disable-next-line no-console
     console.warn('[media-player] playback failure', {
       reason,
       playMode: this.playMode,
-      remuxTried: this.remuxTried,
-      nvencTried: this.nvencTried,
-      preferAccel: this.probe?.preferAccel,
-      accelAvailable: this.probe?.accel?.nvenc,
     });
-
-    // Mark whatever we just tried as exhausted.
-    if (this.playMode === 'remux') this.remuxTried = true;
-    if (this.playMode === 'nvenc') this.nvencTried = true;
-
-    // Forward fallback: remux → nvenc.
-    if (
-      this.playMode === 'remux' &&
-      !this.nvencTried &&
-      this.probe?.accel?.nvenc
-    ) {
-      this.playMode = 'nvenc';
-      return;
-    }
-
-    // Reverse fallback: nvenc → remux. Only safe when the server didn't
-    // explicitly mark the source as `preferAccel: nvenc`. For preferAccel
-    // sources the server has already decided remux can't work (e.g. Xvid in
-    // AVI), and `-c:v copy` produces an MP4 the browser silently treats as
-    // audio-only — worse than a clean external-player handoff. Sources that
-    // fell into nvenc without a preferAccel hint (e.g. a clean h264 source
-    // that hit a transient nvenc error) can still try plain remux.
-    if (
-      this.playMode === 'nvenc' &&
-      !this.remuxTried &&
-      this.probe?.decision === 'remux' &&
-      this.probe?.preferAccel !== 'nvenc'
-    ) {
-      this.playMode = 'remux';
-      return;
-    }
-
-    // Both pipelines exhausted (or none available) → external player.
-    if (this.probe) {
-      this.playMode = 'external';
-      return;
-    }
-
     this.error =
-      'Stream unavailable — desktop appears to be offline. Reconnect from the banner above.';
+      'Stream unavailable. Try reconnecting from the banner above, or check the server log.';
   }
 
   private onVisibilityChange = (): void => {
@@ -2472,23 +2351,6 @@ export class MediaPlayer extends LitElement {
 
   private toggleNamedPopover(key: Exclude<PopoverKey, null>): void {
     this.openPopover = this.openPopover === key ? null : key;
-    // Lazy-fetch diagnostics the first time the info popover opens for this
-    // path. The endpoint is read-only — no ffmpeg spawn.
-    if (key === 'info' && this.openPopover === 'info' && !this.diagnostics) {
-      void this.fetchDiagnostics();
-    }
-  }
-
-  private async fetchDiagnostics(): Promise<void> {
-    const target = this.relPath;
-    try {
-      const d = await apiStreamDiagnostics(target);
-      // Discard if the path changed mid-flight.
-      if (this.relPath === target) this.diagnostics = d;
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn('[media-player] diagnostics fetch failed', err);
-    }
   }
 
   private formatTime(s: number): string {
@@ -2608,19 +2470,19 @@ export class MediaPlayer extends LitElement {
         @loadedmetadata=${this.onLoadedMetadata}
         @loadstart=${this.onTraceEvent}
         @loadeddata=${this.onTraceEvent}
-        @canplay=${this.onTraceEvent}
-        @canplaythrough=${this.onTraceEvent}
+        @canplay=${this.onBufferingEnd}
+        @canplaythrough=${this.onBufferingEnd}
         @durationchange=${this.onDurationChange}
         @timeupdate=${this.onTimeUpdate}
         @progress=${this.onProgress}
         @play=${this.onPlay}
-        @playing=${this.onTraceEvent}
+        @playing=${this.onBufferingEnd}
         @pause=${this.onPause}
-        @waiting=${this.onTraceEvent}
-        @stalled=${this.onTraceEvent}
+        @waiting=${this.onBufferingStart}
+        @stalled=${this.onBufferingStart}
         @suspend=${this.onTraceEvent}
-        @seeking=${this.onTraceEvent}
-        @seeked=${this.onTraceEvent}
+        @seeking=${this.onBufferingStart}
+        @seeked=${this.onBufferingEnd}
         @ratechange=${this.onTraceEvent}
         @volumechange=${this.onTraceEvent}
         @abort=${this.onTraceEvent}
@@ -2648,8 +2510,27 @@ export class MediaPlayer extends LitElement {
             />`
           : null}
       </video>
+      ${this.renderBufferSpinner()}
       ${this.nativeControls ? null : this.renderChrome()}
     `;
+  }
+
+  /** Buffering spinner overlay. Shown only when `<video>` reports `waiting`
+   *  AND that state has persisted ≥200ms — short blips don't flicker the
+   *  spinner. The 200ms gate is enforced by checking `bufferingSince` in
+   *  the render path; once the state passes the threshold, this method
+   *  schedules a re-render at the threshold tick so the spinner appears. */
+  private renderBufferSpinner(): unknown {
+    if (!this.buffering || this.bufferingSince === 0) return null;
+    const elapsed = Date.now() - this.bufferingSince;
+    const SHOW_AFTER_MS = 200;
+    if (elapsed < SHOW_AFTER_MS) {
+      // Schedule one re-render at the threshold so the spinner appears
+      // exactly when the timer expires (not on the next unrelated update).
+      window.setTimeout(() => this.requestUpdate(), SHOW_AFTER_MS - elapsed);
+      return null;
+    }
+    return html`<div class="buffer-spinner"><div class="ring"></div></div>`;
   }
 
   private renderChrome(): unknown {
@@ -2766,12 +2647,27 @@ export class MediaPlayer extends LitElement {
                     class="chapter-tick"
                     title=${title}
                     style=${`left:${pct}%;`}
+                    @mouseenter=${(): void => { this.hoveredChapter = c; }}
+                    @mouseleave=${(): void => {
+                      if (this.hoveredChapter?.index === c.index) this.hoveredChapter = null;
+                    }}
                     @click=${(e: Event): void => {
                       e.stopPropagation();
                       this.onChapterClick(c);
                     }}
                   ></div>`;
                 })}
+                ${this.hoveredChapter
+                  ? (() => {
+                      const hc = this.hoveredChapter;
+                      const pct = Math.max(0, Math.min(100, (hc.startSeconds / this.duration) * 100));
+                      const ttl = hc.title ?? `Chapter ${hc.index + 1}`;
+                      return html`<div class="chapter-tooltip" style=${`left:${pct}%;`}>
+                        <div>${ttl}</div>
+                        <div class="ts">${this.formatTime(hc.startSeconds)}</div>
+                      </div>`;
+                    })()
+                  : null}
               </div>`
             : null}
           <input
@@ -3171,34 +3067,21 @@ export class MediaPlayer extends LitElement {
     `;
   }
 
-  /** Build a copy/paste-friendly diagnostic block. Surfaces everything the
-   *  pre-probe and runtime fallback know: container/codecs, decision vs the
-   *  effective playMode (so you can spot a remux→nvenc downgrade), the
-   *  chosen pipeline profile, audio strategy, the resolved duration, and the
-   *  active stream URL. The textarea is selected on click so one tap +
-   *  Cmd/Ctrl-C copies the whole report. */
+  /** Build a copy/paste-friendly diagnostic block. Surfaces what the HLS
+   *  metadata + runtime state knows: container/codecs, the effective
+   *  playMode, the resolved duration, and the active stream URL. The
+   *  textarea is selected on click so one tap + Cmd/Ctrl-C copies the
+   *  whole report. */
   private buildInfoReport(): string {
     const p = this.probe;
     const v = this.videoEl;
-    const d = this.diagnostics;
     const lines: string[] = [];
     lines.push(`Path:            ${this.relPath}`);
     if (p?.absPath) lines.push(`Abs path:        ${p.absPath}`);
     if (p?.container) lines.push(`Container:       ${p.container}`);
     if (p?.videoCodec) lines.push(`Video codec:     ${p.videoCodec}`);
     if (p?.audioCodec) lines.push(`Audio codec:     ${p.audioCodec}`);
-    if (p?.decision) {
-      const note = p.decision !== this.playMode ? ` (now: ${this.playMode})` : '';
-      lines.push(`Decision:        ${p.decision}${note}`);
-    } else {
-      lines.push(`Play mode:       ${this.playMode}`);
-    }
-    const profile = d?.profile?.name ?? p?.profile;
-    if (profile) lines.push(`Profile:         ${profile}`);
-    if (d?.profile?.audioStrategy) {
-      lines.push(`Audio strategy:  ${d.profile.audioStrategy}`);
-    }
-    if (p?.accel?.nvenc) lines.push(`NVENC avail:     yes${this.nvencTried ? ' (tried)' : ''}`);
+    lines.push(`Play mode:       ${this.playMode}`);
     if (typeof p?.durationSeconds === 'number' && p.durationSeconds > 0) {
       lines.push(`Probe duration:  ${p.durationSeconds.toFixed(2)}s`);
     }
@@ -3220,9 +3103,6 @@ export class MediaPlayer extends LitElement {
         const msg = f.videoErrorMessage ? ` msg="${f.videoErrorMessage}"` : '';
         lines.push(`  ${t} ${f.reason} mode=${f.playMode}${code}${msg}`);
       }
-    }
-    if (d?.ffmpegArgs && this.ffmpegArgsExpanded) {
-      lines.push(`ffmpeg args:     ${d.ffmpegArgs.join(' ')}`);
     }
     lines.push(`User agent:      ${navigator.userAgent}`);
     return lines.join('\n');
@@ -3250,7 +3130,6 @@ export class MediaPlayer extends LitElement {
             paused: v.paused,
           }
         : null,
-      diagnostics: this.diagnostics,
       failureLog: this.failureLog,
       consoleBuffer: getConsoleBuffer(),
       userAgent: navigator.userAgent,
@@ -3289,7 +3168,6 @@ export class MediaPlayer extends LitElement {
               videoErrorMessage: v.error?.message ?? null,
             }
           : null,
-        diagnostics: this.diagnostics,
         failureLog: this.failureLog,
         consoleBuffer: getConsoleBuffer(),
         // 0.1.7 — full narrative trace of player events leading up to the
@@ -3348,7 +3226,6 @@ export class MediaPlayer extends LitElement {
   private renderInfoPopover(): unknown {
     const open = this.openPopover === 'info';
     const text = open ? this.buildInfoReport() : '';
-    const args = this.diagnostics?.ffmpegArgs ?? null;
     return html`
       <player-popover ?open=${open} .width=${380} .notchRightPx=${18}>
         <div @click=${(e: Event): void => e.stopPropagation()} style="--stagger-index:0">
@@ -3376,20 +3253,6 @@ export class MediaPlayer extends LitElement {
             @click=${(e: Event): void => (e.target as HTMLTextAreaElement).select()}
             style="width:100%;min-height:240px;background:#0c0c0c;color:#cdd;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.45;box-sizing:border-box;resize:vertical;"
           ></textarea>
-          ${args
-            ? html`
-                <details
-                  ?open=${this.ffmpegArgsExpanded}
-                  @toggle=${(e: Event): void => {
-                    this.ffmpegArgsExpanded = (e.target as HTMLDetailsElement).open;
-                  }}
-                  style="margin-top:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:#bcd;"
-                >
-                  <summary style="cursor:pointer;letter-spacing:1px;text-transform:uppercase;font-size:10px;color:var(--hm-accent);">ffmpeg args (${args.length})</summary>
-                  <pre style="white-space:pre-wrap;word-break:break-all;margin:6px 0 0;background:#0c0c0c;border:1px solid rgba(255,255,255,0.08);border-radius:6px;padding:8px 10px;line-height:1.45;">${args.join(' ')}</pre>
-                </details>
-              `
-            : null}
         </div>
       </player-popover>
     `;

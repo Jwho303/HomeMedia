@@ -22,6 +22,7 @@ function card(overrides: Partial<HomeCardItem> = {}): HomeCardItem {
     genres: [],
     addedAt: 0,
     lastPlayedAt: null,
+    imdbRating: null,
     ...overrides,
   };
 }

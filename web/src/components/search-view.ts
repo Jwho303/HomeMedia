@@ -3,6 +3,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiLibrary, ShareOfflineError } from '../api.js';
 import { goBack, homeHref, navigate, playHref, seriesHref } from '../router.js';
 import type { Library, LibraryItem } from '../types.js';
+import { formatImdbRating } from './poster-strip.js';
 
 /**
  * 0.1.5.1 — `#/search` view. Owns its own `<input>`, debounces the query,
@@ -134,6 +135,31 @@ export class SearchView extends LitElement {
       border-radius: var(--radius-xs);
       text-transform: uppercase;
       letter-spacing: 0.5px;
+    }
+    /* IMDb rating pill — matches the poster-strip styling. (0.1.8) */
+    .rating-pill {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #111;
+      background: linear-gradient(180deg, #ffe27a 0%, #f5c518 100%);
+      padding: 2px 6px 2px 5px;
+      border-radius: var(--radius-xs);
+      line-height: 1;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+    }
+    .rating-pill .star {
+      width: 10px;
+      height: 10px;
+      fill: #111;
+      flex-shrink: 0;
     }
     .meta {
       display: flex;
@@ -282,12 +308,21 @@ export class SearchView extends LitElement {
 
   private renderTile(item: LibraryItem): unknown {
     const title = item.title ?? item.path;
+    const ratingLabel = formatImdbRating(item.imdbRating);
     return html`
       <button class="tile" @click=${(): void => this.onTileClick(item)}>
         <div class="frame">
           ${item.posterUrl
             ? html`<img src=${item.posterUrl} alt=${title} loading="lazy" />`
             : html`<div class="placeholder">${title}</div>`}
+          ${ratingLabel
+            ? html`<span class="rating-pill" aria-label=${`IMDb rating ${ratingLabel} of 10`}>
+                <svg class="star" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 2 L14.85 8.63 L22 9.27 L16.5 14.14 L18.18 21.02 L12 17.27 L5.82 21.02 L7.5 14.14 L2 9.27 L9.15 8.63 Z"></path>
+                </svg>
+                ${ratingLabel}
+              </span>`
+            : null}
           <span class="badge">${item.type}</span>
         </div>
         <div class="meta">

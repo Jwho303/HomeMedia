@@ -22,7 +22,7 @@ import {
 } from './identify/cohorts.js';
 import { type KnownSeason } from './identify/episode.js';
 import { similarity } from './identify/strings.js';
-import { createOmdbSource } from './identify/sources/omdb.js';
+import { createOmdbSource, createOmdbRatingFetcher } from './identify/sources/omdb.js';
 import { createTvdbSource } from './identify/sources/tvdb.js';
 import { createBudgetTracker } from './identify/budget.js';
 import { passBIdentify, type PassBSources } from './identify/passB.js';
@@ -269,6 +269,18 @@ interface TmdbDeps {
   getMovie?: typeof tmdb.getMovie;
   /** Optional — used by Pass B to resolve an IMDb id to a TMDB record. */
   findByImdbId?: typeof tmdb.findByImdbId;
+  /** 0.1.8 — IMDb id resolver per TMDB id. Used by the rating-fetch path
+   *  (cohort-identified items don't carry imdbId; we ask TMDB for it before
+   *  hitting OMDb). */
+  getMovieExternalIds?: typeof tmdb.getMovieExternalIds;
+  getSeriesExternalIds?: typeof tmdb.getSeriesExternalIds;
+}
+
+/** 0.1.8 — IMDb rating fetcher dependency. Returns null on miss (unknown
+ *  imdbId, network error, OMDb quota exhausted) — call site treats absence
+ *  as "leave existing DB value alone". */
+export interface RatingDeps {
+  fetchRating(imdbId: string): Promise<{ rating: number; votes: number | null } | null>;
 }
 
 export interface ScanDeps {
@@ -281,6 +293,9 @@ export interface ScanDeps {
   omdbSource?: Source | null;
   /** Override TVDB source. */
   tvdbSource?: Source | null;
+  /** 0.1.8 — Override IMDb rating fetcher (for tests / disabling). When undefined
+   *  and `OMDB_API_KEY` is set, built from config alongside the OMDb source. */
+  ratingFetcher?: RatingDeps | null;
   /** 0.1.4.3 — overrides for the per-file prober. Tests inject a fake probe()
    *  to avoid spawning ffprobe. */
   proberDeps?: ProbeFileDeps;
@@ -338,6 +353,18 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
   const share = deps.share ?? shareStatus;
   const source: Source = tmdbSource(t);
   const progress = deps.progress;
+  // 0.1.8 — IMDb rating fetcher. Built once per scan, shared budget with the
+  // OMDb identification source so a heavy Pass B + a rating refresh don't
+  // both blow through the daily quota.
+  const ratingFetcher: RatingDeps | null =
+    deps.ratingFetcher !== undefined
+      ? deps.ratingFetcher
+      : config.omdbApiKey
+      ? createOmdbRatingFetcher({
+          apiKey: config.omdbApiKey,
+          budget: createBudgetTracker(config.omdbBudgetPath, 1000),
+        })
+      : null;
 
   const s = await share(mediaRoot);
   if (!s.online) throw new ShareOfflineError(mediaRoot);
@@ -413,11 +440,27 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
       }
       if (!title) title = `tmdb:${override.tmdb_id}`;     // fallback path key
 
+      // 0.1.8 — fetch IMDb rating for the manually-overridden identity. Skip
+      // when the existing row already has a rating, except on `--full` (Hard
+      // refresh) which re-pulls everything. Failures are silent.
+      let imdbRating: number | null = null;
+      let imdbVotes: number | null = null;
+      let resolvedImdbId: string | null = override.imdb_id ?? existing?.imdb_id ?? null;
+      const skipRating = !opts.full && !!(existing && existing.imdb_rating != null);
+      if (ratingFetcher && !skipRating) {
+        const r = await resolveImdbRating(override.tmdb_id, override.type, resolvedImdbId, ratingFetcher, t, log);
+        if (r) {
+          resolvedImdbId = r.imdbId;
+          imdbRating = r.rating;
+          imdbVotes = r.votes;
+        }
+      }
+
       await applyIdentity(
         f.relPosix,
         {
           tmdbId: override.tmdb_id,
-          imdbId: override.imdb_id,
+          imdbId: resolvedImdbId,
           tvdbId: override.tvdb_id,
           type: override.type,
           title,
@@ -425,6 +468,8 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
           posterUrl,
           backdropUrl,
           overview,
+          imdbRating,
+          imdbVotes,
         },
         {
           confidence: 1.0,
@@ -545,6 +590,7 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
         deps.proberDeps,
         progress,
         fileCounter,
+        ratingFetcher,
       );
     } catch (err) {
       result.errors++;
@@ -553,7 +599,7 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
   }
 
   // 4. Pass B — multi-source rescue over needs_review entries (0.1.1.3).
-  await runPassB(deps, source, db, log, t, startedAt, result);
+  await runPassB(deps, source, db, log, t, startedAt, result, ratingFetcher, opts);
 
   const staleRow = db.raw
     .prepare(`SELECT COUNT(*) AS c FROM media_items WHERE scanned_at < ?`)
@@ -605,6 +651,8 @@ async function runPassB(
   t: TmdbDeps,
   startedAt: number,
   result: ScanResult,
+  rating: RatingDeps | null,
+  opts: ScanOptions,
 ): Promise<void> {
   const reviewItems = db.listReview();
   if (reviewItems.length === 0) return;
@@ -672,6 +720,24 @@ async function runPassB(
 
       try {
         const type = resolvedTmdb.type === 'tv' ? 'series' : 'movie';
+        // 0.1.8 — fetch IMDb rating for the rescued identity. Pass B already
+        // hit OMDb during corroboration, so the budget tracker may say no
+        // here — that's fine, we just leave imdb_rating null and let
+        // --refresh-ratings catch up later.
+        const seriesType: 'movie' | 'series' = type === 'series' ? 'series' : 'movie';
+        let imdbRating: number | null = null;
+        let imdbVotes: number | null = null;
+        let resolvedImdbId: string | null = resolvedTmdb.imdbId ?? r.imdbId ?? null;
+        const existingRow = db.getByTmdbId(resolvedTmdbId, seriesType);
+        const skipRating = !opts.full && !!(existingRow && existingRow.imdb_rating != null);
+        if (rating && !skipRating) {
+          const rr = await resolveImdbRating(resolvedTmdbId, seriesType, resolvedImdbId, rating, t, log);
+          if (rr) {
+            resolvedImdbId = rr.imdbId;
+            imdbRating = rr.rating;
+            imdbVotes = rr.votes;
+          }
+        }
         // posterPath/backdropPath at this layer are TMDB raw paths
         // (e.g. "/abc.jpg"). Convert to full CDN URLs before persisting,
         // otherwise the browser treats the leading-slash path as
@@ -680,7 +746,7 @@ async function runPassB(
           relPosix,
           {
             tmdbId: resolvedTmdbId,
-            imdbId: resolvedTmdb.imdbId ?? r.imdbId ?? null,
+            imdbId: resolvedImdbId,
             tvdbId: resolvedTmdb.tvdbId ?? r.tvdbId ?? null,
             type,
             title: resolvedTmdb.title,
@@ -688,6 +754,8 @@ async function runPassB(
             posterUrl: t.posterUrl(resolvedTmdb.posterPath),
             backdropUrl: t.posterUrl(resolvedTmdb.backdropPath),
             overview: resolvedTmdb.overview,
+            imdbRating,
+            imdbVotes,
           },
           {
             confidence: w.score,
@@ -752,6 +820,7 @@ async function processCohort(
   proberDeps: ProbeFileDeps | undefined,
   progress: ProgressEmitter | undefined,
   counter: FileCounter,
+  rating: RatingDeps | null,
 ): Promise<void> {
   // mtime-skip optimization: if NOT --full and every file has unchanged mtime AND there's no
   // pending review entry that needs re-evaluation, just bump scanned_at on existing rows.
@@ -803,9 +872,9 @@ async function processCohort(
   // Persist the cohort identity. Movies → one media_items row + N media_files rows. Series →
   // one media_items row + N episodes rows.
   if (identity.type === 'movie') {
-    await persistMovieCohort(cohort, identity, opts, startedAt, db, t, log, result);
+    await persistMovieCohort(cohort, identity, opts, startedAt, db, t, log, result, rating);
   } else {
-    await persistSeriesCohort(cohort, identity, cohortDeps, opts, startedAt, db, t, source, log, seasonEpisodesCache, result);
+    await persistSeriesCohort(cohort, identity, cohortDeps, opts, startedAt, db, t, source, log, seasonEpisodesCache, result, rating);
   }
   for (const f of cohort.files) {
     progress?.emit({
@@ -896,6 +965,40 @@ async function tryFastSkip(cohort: Cohort, db: DbHandle, startedAt: number): Pro
   return true;
 }
 
+/** 0.1.8 — Resolve IMDb id (if not already known) and fetch the rating.
+ *  Returns the imdb_id (so the caller can persist it alongside the rating)
+ *  plus the /10 rating and vote count. Returns null when no rating could
+ *  be obtained — either no fetcher, no IMDb id resolvable, or OMDb has no
+ *  rating for this title. Caller treats null as "leave any existing
+ *  imdb_rating in the DB alone" (upsert COALESCEs).
+ */
+async function resolveImdbRating(
+  tmdbId: number,
+  type: 'movie' | 'series',
+  imdbIdHint: string | null,
+  rating: RatingDeps | null,
+  t: TmdbDeps,
+  log: ScanLogger,
+): Promise<{ imdbId: string; rating: number; votes: number | null } | null> {
+  if (!rating) return null;
+  let imdbId = imdbIdHint;
+  if (!imdbId) {
+    try {
+      const ext =
+        type === 'movie'
+          ? await t.getMovieExternalIds?.(tmdbId)
+          : await t.getSeriesExternalIds?.(tmdbId);
+      if (ext?.imdb_id) imdbId = ext.imdb_id;
+    } catch (err) {
+      log.warn(`could not resolve imdb id for tmdb=${tmdbId}: ${(err as Error).message}`);
+    }
+  }
+  if (!imdbId) return null;
+  const r = await rating.fetchRating(imdbId);
+  if (!r) return null;
+  return { imdbId, rating: r.rating, votes: r.votes };
+}
+
 function recordReview(
   db: DbHandle,
   relPosix: string,
@@ -919,12 +1022,13 @@ function recordReview(
 async function persistMovieCohort(
   cohort: Cohort,
   identity: CohortIdentity,
-  _opts: ScanOptions,
+  opts: ScanOptions,
   startedAt: number,
   db: DbHandle,
   t: TmdbDeps,
   log: ScanLogger,
   result: ScanResult,
+  rating: RatingDeps | null,
 ): Promise<void> {
   // For movie cohorts: one media_items row per cohort. Path is the cohort folder when there
   // is one, otherwise the (single) file's path. media_files holds each rip's playable path.
@@ -948,6 +1052,24 @@ async function persistMovieCohort(
     }
   }
 
+  // 0.1.8: pull IMDb rating from OMDb (one extra request per identified item
+  // when an OMDb key is configured). On an incremental scan we skip rows
+  // that already have a rating — re-running shouldn't burn quota refetching
+  // numbers that change slowly. `--full` (the "Hard refresh" UI button) and
+  // the `--refresh-ratings` catch-up CLI bypass this gate.
+  let imdbRating: number | null = null;
+  let imdbVotes: number | null = null;
+  let resolvedImdbId: string | null = existing?.imdb_id ?? null;
+  const skipRating = !opts.full && !!(existing && existing.imdb_rating != null);
+  if (rating && !skipRating) {
+    const r = await resolveImdbRating(identity.tmdbId, 'movie', resolvedImdbId, rating, t, log);
+    if (r) {
+      resolvedImdbId = r.imdbId;
+      imdbRating = r.rating;
+      imdbVotes = r.votes;
+    }
+  }
+
   // If there's already a movie row for this tmdb_id, reuse it (handles re-scans across runs
   // and prevents duplicate rows when the path key shifts between runs).
   let itemId: number;
@@ -962,18 +1084,22 @@ async function persistMovieCohort(
       .prepare(
         `UPDATE media_items
          SET title = ?, year = ?,
+             imdb_id      = COALESCE(?, imdb_id),
              poster_url   = COALESCE(?, poster_url),
              backdrop_url = COALESCE(?, backdrop_url),
              overview     = COALESCE(?, overview),
              confidence = ?, identification_json = ?,
              genres_json = COALESCE(?, genres_json),
              runtime_seconds = COALESCE(?, runtime_seconds),
+             imdb_rating = COALESCE(?, imdb_rating),
+             imdb_votes  = COALESCE(?, imdb_votes),
              scanned_at = ?
          WHERE id = ?`,
       )
       .run(
         identity.title,
         identity.year,
+        resolvedImdbId,
         t.posterUrl(identity.posterPath),
         t.posterUrl(identity.backdropPath),
         identity.overview,
@@ -981,6 +1107,8 @@ async function persistMovieCohort(
         identificationJson(cohort, identity),
         genresJson,
         runtimeSeconds,
+        imdbRating,
+        imdbVotes,
         startedAt,
         existing.id,
       );
@@ -991,6 +1119,7 @@ async function persistMovieCohort(
       path: itemPath,
       type: 'movie',
       tmdb_id: identity.tmdbId,
+      imdb_id: resolvedImdbId,
       title: identity.title,
       year: identity.year,
       poster_url: t.posterUrl(identity.posterPath),
@@ -1000,6 +1129,8 @@ async function persistMovieCohort(
       identification_json: identificationJson(cohort, identity),
       genres_json: genresJson,
       runtime_seconds: runtimeSeconds,
+      imdb_rating: imdbRating,
+      imdb_votes: imdbVotes,
       mtime: cohort.files[0]!.mtime,
       scanned_at: startedAt,
     });
@@ -1034,7 +1165,7 @@ async function persistSeriesCohort(
   cohort: Cohort,
   identity: CohortIdentity,
   cohortDeps: IdentifyDeps,
-  _opts: ScanOptions,
+  opts: ScanOptions,
   startedAt: number,
   db: DbHandle,
   t: TmdbDeps,
@@ -1042,6 +1173,7 @@ async function persistSeriesCohort(
   log: ScanLogger,
   seasonEpisodesCache: Map<string, tmdb.TmdbSeason | null>,
   result: ScanResult,
+  rating: RatingDeps | null,
 ): Promise<void> {
   // Series-level row: keyed on the cohort's series-root path when available, or on the
   // (deterministic) cohort key otherwise. If a row already exists for this tmdb_id, reuse it.
@@ -1059,6 +1191,22 @@ async function persistSeriesCohort(
     // tolerate missing details
   }
 
+  // 0.1.8: IMDb rating, see persistMovieCohort for rationale. `--full` (Hard
+  // refresh) bypasses the "already has rating" skip so the user can recover
+  // from an OMDb outage that left rows null.
+  let imdbRating: number | null = null;
+  let imdbVotes: number | null = null;
+  let resolvedImdbId: string | null = existingByTmdbId?.imdb_id ?? null;
+  const skipRating = !opts.full && !!(existingByTmdbId && existingByTmdbId.imdb_rating != null);
+  if (rating && !skipRating) {
+    const r = await resolveImdbRating(identity.tmdbId, 'series', resolvedImdbId, rating, t, log);
+    if (r) {
+      resolvedImdbId = r.imdbId;
+      imdbRating = r.rating;
+      imdbVotes = r.votes;
+    }
+  }
+
   let seriesRow: MediaItemRow;
   if (existingByTmdbId) {
     // COALESCE on poster/backdrop/overview so a library-tiebreaker
@@ -1068,23 +1216,29 @@ async function persistSeriesCohort(
       .prepare(
         `UPDATE media_items
          SET title = ?, year = ?,
+             imdb_id      = COALESCE(?, imdb_id),
              poster_url   = COALESCE(?, poster_url),
              backdrop_url = COALESCE(?, backdrop_url),
              overview     = COALESCE(?, overview),
              confidence = ?, identification_json = ?,
              genres_json = COALESCE(?, genres_json),
+             imdb_rating = COALESCE(?, imdb_rating),
+             imdb_votes  = COALESCE(?, imdb_votes),
              scanned_at = ?
          WHERE id = ?`,
       )
       .run(
         identity.title,
         identity.year,
+        resolvedImdbId,
         t.posterUrl(identity.posterPath),
         t.posterUrl(identity.backdropPath),
         identity.overview,
         identity.confidence,
         identificationJson(cohort, identity),
         genresJson,
+        imdbRating,
+        imdbVotes,
         startedAt,
         existingByTmdbId.id,
       );
@@ -1094,6 +1248,7 @@ async function persistSeriesCohort(
       path: seriesPath,
       type: 'series',
       tmdb_id: identity.tmdbId,
+      imdb_id: resolvedImdbId,
       title: identity.title,
       year: identity.year,
       poster_url: t.posterUrl(identity.posterPath),
@@ -1102,6 +1257,8 @@ async function persistSeriesCohort(
       confidence: identity.confidence,
       identification_json: identificationJson(cohort, identity),
       genres_json: genresJson,
+      imdb_rating: imdbRating,
+      imdb_votes: imdbVotes,
       mtime: 0,
       scanned_at: startedAt,
     });
@@ -1264,3 +1421,113 @@ export { ShareOfflineError };
 // Internal — exported for the test surface. Suppresses unused-warning for ProcessIdentityCacheKey
 // in a cleaner way than `// eslint-disable-next-line`.
 export type _InternalIdentityCacheKey = ProcessIdentityCacheKey;
+
+// ---------------------------------------------------------------------------
+// 0.1.8 — IMDb rating catch-up pass
+// ---------------------------------------------------------------------------
+
+export interface RefreshRatingsOptions {
+  /** When true, refetch rows that already have a rating. Default: skip. */
+  force?: boolean;
+}
+
+export interface RefreshRatingsResult {
+  /** Rows considered (already-identified movies + series). */
+  considered: number;
+  /** Rows for which an IMDb id was already known or could be resolved. */
+  resolved: number;
+  /** Rows we actually wrote a fresh rating to. */
+  updated: number;
+  /** Rows we skipped because they already had a rating (and `force` is off). */
+  skipped: number;
+  /** Rows where OMDb returned no rating (or quota was exhausted). */
+  missed: number;
+}
+
+export interface RefreshRatingsDeps {
+  db?: DbHandle;
+  tmdb?: TmdbDeps;
+  ratingFetcher?: RatingDeps | null;
+  logger?: ScanLogger;
+}
+
+/** Walk every identified media_items row and pull its IMDb rating from OMDb.
+ *  Idempotent — rows that already have a rating are skipped unless `force`
+ *  is set. The function never throws on a per-row failure; it logs and moves
+ *  on so a single bad imdbID doesn't stop the whole pass. */
+export async function refreshRatings(
+  opts: RefreshRatingsOptions = {},
+  deps: RefreshRatingsDeps = {},
+): Promise<RefreshRatingsResult> {
+  const db = deps.db ?? getDb();
+  const t = deps.tmdb ?? tmdb;
+  const log = deps.logger ?? noopLogger;
+
+  const ratingFetcher: RatingDeps | null =
+    deps.ratingFetcher !== undefined
+      ? deps.ratingFetcher
+      : config.omdbApiKey
+      ? createOmdbRatingFetcher({
+          apiKey: config.omdbApiKey,
+          budget: createBudgetTracker(config.omdbBudgetPath, 1000),
+        })
+      : null;
+
+  const result: RefreshRatingsResult = {
+    considered: 0,
+    resolved: 0,
+    updated: 0,
+    skipped: 0,
+    missed: 0,
+  };
+
+  if (!ratingFetcher) {
+    log.warn('refresh-ratings: no OMDB_API_KEY configured — skipping');
+    return result;
+  }
+
+  // Iterate every identified row. We use the raw DB so we can stream a
+  // narrow projection and avoid loading the full library at once.
+  const rows = db.raw
+    .prepare<[], { id: number; type: 'movie' | 'series'; tmdb_id: number | null; imdb_id: string | null; imdb_rating: number | null; title: string | null }>(
+      `SELECT id, type, tmdb_id, imdb_id, imdb_rating, title
+       FROM media_items
+       WHERE tmdb_id IS NOT NULL`,
+    )
+    .all();
+
+  const update = db.raw.prepare<[number | null, number | null, string | null, number]>(
+    `UPDATE media_items
+     SET imdb_rating = ?, imdb_votes = ?, imdb_id = COALESCE(?, imdb_id)
+     WHERE id = ?`,
+  );
+
+  for (const r of rows) {
+    result.considered++;
+    if (!opts.force && r.imdb_rating != null) {
+      result.skipped++;
+      continue;
+    }
+    if (r.tmdb_id == null) continue;
+    const resolved = await resolveImdbRating(
+      r.tmdb_id,
+      r.type,
+      r.imdb_id,
+      ratingFetcher,
+      t,
+      log,
+    );
+    if (!resolved) {
+      result.missed++;
+      continue;
+    }
+    result.resolved++;
+    update.run(resolved.rating, resolved.votes, resolved.imdbId, r.id);
+    result.updated++;
+    log.info(
+      `★ ${r.title ?? `id=${r.id}`} → imdb=${resolved.imdbId} rating=${resolved.rating}${resolved.votes != null ? ` (${resolved.votes} votes)` : ''}`,
+    );
+  }
+
+  return result;
+}

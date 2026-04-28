@@ -33,6 +33,8 @@ export interface HomeCardItem {
   genres: string[];
   addedAt: number;
   lastPlayedAt: number | null;
+  /** IMDb /10 rating from OMDb. Null when unknown. (0.1.8) */
+  imdbRating: number | null;
   /** Continue rows only. */
   resumeLabel?: string | null;
 }
@@ -73,6 +75,7 @@ export function libraryItemToCard(item: LibraryItem): HomeCardItem {
     genres: item.genres,
     addedAt: item.addedAt,
     lastPlayedAt: item.lastPlayedAt,
+    imdbRating: item.imdbRating,
   };
 }
 
@@ -93,6 +96,9 @@ export function continueRowToCard(row: ContinueRow): HomeCardItem {
     genres: [],
     addedAt: row.lastPlayedAt,
     lastPlayedAt: row.lastPlayedAt,
+    // Continue rows don't currently carry rating; the home grid card has it
+    // and will replace the continue-row card when the user clicks through.
+    imdbRating: null,
     resumeLabel: row.resumeLabel,
   };
 }

@@ -28,10 +28,6 @@ const Schema = z.object({
    *  `index.m3u8` + `seg-NNNNN.ts` files. Cleaned up on session teardown
    *  and on server startup (orphans from a hard crash). */
   HLS_CACHE_DIR: z.string().default(defaultHlsCacheDir),
-  /** 0.1.6 D13 — feature flag gating the HLS player path. While false the
-   *  legacy probe-and-decide path stays in effect for the client. The
-   *  server registers the new HLS routes unconditionally. */
-  HLS_PLAYER: z.string().default('false'),
   // Optional — only read on darwin for `mount volume` reconnect.
   SMB_HOST: z.string().optional(),
   SMB_SHARE: z.string().optional(),
@@ -56,7 +52,6 @@ export interface Config {
   dbPath: string;
   cacheDir: string;
   hlsCacheDir: string;
-  hlsPlayer: boolean;
   smbHost: string | null;
   smbShare: string | null;
 }
@@ -83,7 +78,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: path.resolve(parsed.data.DB_PATH),
     cacheDir: path.resolve(parsed.data.CACHE_DIR),
     hlsCacheDir: path.resolve(parsed.data.HLS_CACHE_DIR),
-    hlsPlayer: parsed.data.HLS_PLAYER.toLowerCase() === 'true',
     smbHost: parsed.data.SMB_HOST?.trim() || null,
     smbShare: parsed.data.SMB_SHARE?.trim() || null,
   };

@@ -129,13 +129,12 @@ export async function registerHlsRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    // 0.1.7 — burn-in pre-flight. ffmpeg's `subtitles=` filter only handles
-    // text-based subs (subrip/ass/ssa/webvtt). Image-based subs (PGS,
-    // dvd_subtitle/VobSub, dvb_subtitle) need overlay+filter_complex which
-    // we don't support yet. Without this guard ffmpeg spawns, fails inside
-    // `[Parsed_subtitles_2] Only text based subtitles are currently
-    // supported`, the playlist never appears, and we wait 30s on
-    // `waitForPlaylist` before timing out — confusing UX. Reject early.
+    // Burn-in pre-flight. The text-vs-image hint determines which filter
+    // chain hls-args picks (`subtitles=` for text, `[0:s:N]overlay` for
+    // image-based PGS/VobSub/DVB). Both are supported as of the Phase 4
+    // follow-up (2026-04-27); this block now just resolves the sub stream
+    // and rejects an out-of-range index.
+    let burnSubTextBased: boolean | undefined;
     if (burnSubStreamIndex !== undefined) {
       const subStreams = (probeResult as { subStreams?: { subIndex: number; textBased: boolean }[] }).subStreams ?? [];
       const target = subStreams.find((s) => s.subIndex === burnSubStreamIndex);
@@ -146,17 +145,7 @@ export async function registerHlsRoutes(app: FastifyInstance): Promise<void> {
         );
         return reply.code(415).send({ decision: 'external', absPath, error: 'burn_target_not_found' });
       }
-      if (!target.textBased) {
-        req.log.warn(
-          { evt: 'hls.burnInvalid', relPath, burnSubStreamIndex, reason: 'image_based' },
-          'burn-in requested for image-based sub (unsupported by `subtitles=` filter)',
-        );
-        return reply.code(415).send({
-          decision: 'external',
-          absPath,
-          error: 'burn_image_sub_unsupported',
-        });
-      }
+      burnSubTextBased = target.textBased;
     }
 
     const mgr = getHlsSessionManager();
@@ -164,10 +153,12 @@ export async function registerHlsRoutes(app: FastifyInstance): Promise<void> {
       startSeconds?: number;
       audioStreamIndex?: number;
       burnSubStreamIndex?: number;
+      burnSubTextBased?: boolean;
     } = {};
     if (startSeconds > 0) opts.startSeconds = startSeconds;
     if (audioStreamIndex !== undefined) opts.audioStreamIndex = audioStreamIndex;
     if (burnSubStreamIndex !== undefined) opts.burnSubStreamIndex = burnSubStreamIndex;
+    if (burnSubTextBased !== undefined) opts.burnSubTextBased = burnSubTextBased;
 
     let session;
     try {
@@ -320,6 +311,26 @@ export async function registerHlsRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(204).send();
     }
     await getHlsSessionManager().delete(sessionId);
+    return reply.code(204).send();
+  });
+
+  // Heartbeat. The player pings this every ~20s while playing to keep the
+  // session out of the idle GC. Without it, hls.js can buffer enough to
+  // play uninterrupted for >60s — at which point the segment fetches stop,
+  // the GC reaps the session, and the next segment request 404s with the
+  // session already gone. Returns 410 when the session is gone so the
+  // client can respawn at the current playback position.
+  app.post('/api/hls/:sessionId/touch', async (req, reply) => {
+    const params = req.params as { sessionId?: string };
+    const sessionId = params.sessionId ?? '';
+    if (!/^[a-f0-9-]{8,}$/i.test(sessionId)) {
+      return reply.code(400).send({ error: 'bad_session' });
+    }
+    const mgr = getHlsSessionManager();
+    if (!mgr.get(sessionId)) {
+      return reply.code(410).send({ error: 'session_gone' });
+    }
+    mgr.touch(sessionId);
     return reply.code(204).send();
   });
 }

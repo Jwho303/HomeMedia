@@ -25,6 +25,8 @@ function libraryItem(overrides: Partial<LibraryItem>): LibraryItem {
     watchedAt: null,
     addedAt: 0,
     lastPlayedAt: null,
+    imdbRating: null,
+    imdbVotes: null,
     ...overrides,
   };
 }

@@ -98,6 +98,13 @@ export interface PipelineInput {
    *  `-c:v copy` can't burn — the route layer is responsible for promoting
    *  remux→nvenc when this is set. (0.1.4.3) */
   burnSubStreamIndex?: number;
+  /** True when the burn-in target is text-based (subrip/ass/ssa/webvtt/etc.).
+   *  Drives the choice of filter chain: text → `subtitles=` filter (parses
+   *  the source file off the input path); image (PGS, dvd_subtitle, dvb) →
+   *  `[0:s:N]overlay` filter_complex chain. Without this hint we'd default
+   *  to the text path, which fails for image subs with "Only text based
+   *  subtitles are currently supported". (Phase 4 follow-up, 2026-04-27.) */
+  burnSubTextBased?: boolean;
 }
 
 export type AudioStrategy = 'copy' | 'transcode';
@@ -150,12 +157,14 @@ function buildMapArgs(audioStreamIndex: number | undefined): ReadonlyArray<strin
 }
 
 /** Build the subtitles filter for burn-in. Uses `subtitles=<absPath>:si=<n>`,
- *  the canonical ffmpeg form. ffmpeg's filter requires forward slashes and
- *  some characters need escaping; we keep it simple by reflecting the path
- *  verbatim and trusting the caller's resolveStreamPath sandboxing. */
+ *  the canonical ffmpeg form. The path is wrapped in single quotes so most
+ *  filtergraph specials (`:`, `,`, `[`, `]`, `;`, spaces) are passed through;
+ *  literal `'` inside the path is escaped as `'\''` (close, escaped, reopen).
+ *  Backslashes are normalized to forward slashes first so the inner content
+ *  contains nothing the parser would treat as an escape lead-in. */
 function buildBurnSubFilter(absPath: string, subIdx: number): string {
-  // Backslashes (Windows) and colons need escaping in lavfi expressions.
-  const escaped = absPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+  const forward = absPath.replace(/\\/g, '/');
+  const escaped = forward.replace(/'/g, `'\\''`);
   return `subtitles='${escaped}':si=${subIdx}`;
 }
 

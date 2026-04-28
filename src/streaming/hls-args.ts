@@ -90,8 +90,25 @@ function buildMapArgs(audioStreamIndex: number | undefined): ReadonlyArray<strin
   return ['-map', '0:v:0', '-map', `0:a:${audioStreamIndex}`];
 }
 
+/** Build the `subtitles=…:si=N` filter for burn-in. ffmpeg's filtergraph
+ *  parser is two-layer: filter-args are split on `:`, and the values inside
+ *  may need escaping so the parser doesn't mistake them for argument
+ *  separators. Wrapping the path in single quotes protects `:`, `,`, `[`,
+ *  `]`, `;`, `\`, and spaces — but a literal `'` in the path would close the
+ *  quoted region. Mid-string `'` therefore needs to be escaped as `'\\\''`
+ *  (close, escaped quote, reopen).
+ *
+ *  Backslashes (Windows separators) are converted to forward slashes first
+ *  so the inner-string content never contains `\`, which the parser would
+ *  otherwise consume as an escape.
+ *
+ *  Reference: https://ffmpeg.org/ffmpeg-filters.html#Notes-on-filtergraph-escaping
+ */
 function buildBurnSubFilter(absPath: string, subIdx: number): string {
-  const escaped = absPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+  const forward = absPath.replace(/\\/g, '/');
+  // Within '…', a literal apostrophe is "close-quote, escape-apostrophe,
+  // reopen": '\''. JS string: `'\\\''` which produces the four chars `'\''`.
+  const escaped = forward.replace(/'/g, `'\\''`);
   return `subtitles='${escaped}':si=${subIdx}`;
 }
 
@@ -190,8 +207,45 @@ function buildRemuxHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArra
   ];
 }
 
-/** Build the modern-source HLS arg list. NVENC, GPU pixfmt convert, AAC. */
+/** Build the modern-source HLS arg list. NVENC, GPU pixfmt convert, AAC.
+ *
+ *  Three sub-shapes depending on burn-in state:
+ *    1. No burn-in       → `-hwaccel cuda` + `-vf scale_cuda=format=yuv420p`.
+ *    2. Text-sub burn-in → `-hwaccel cuda` + `-vf hwdownload,format=nv12,subtitles=…,format=yuv420p`.
+ *    3. Image-sub burn-in → no hwaccel; `-filter_complex
+ *       "[0:v][0:s:N]overlay[outv]"` with `-map [outv]`. The overlay filter
+ *       requires the subtitle stream to be decoded as a separate input —
+ *       impossible on the GPU path because NVDEC doesn't decode
+ *       PGS/dvd_subtitle/dvb_subtitle. We pay a CPU decode for the video
+ *       too, but NVENC still encodes (ffmpeg uploads frames implicitly).
+ */
 function buildModernHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArray<string> {
+  const mode = pickPlaylistMode(input);
+  const { inputSide, outputSide } = buildSeekArgs(input.startSeconds);
+
+  if (input.burnSubStreamIndex !== undefined && input.burnSubTextBased === false) {
+    // Image-sub overlay path. No hwaccel; software decode + overlay + NVENC encode.
+    const filter = buildImageOverlayFilter(input.burnSubStreamIndex);
+    return [
+      '-loglevel', 'info',
+      '-y',
+      ...inputSide,
+      '-i', input.absPath,
+      ...outputSide,
+      '-filter_complex', filter,
+      '-map', '[outv]',
+      // Audio still maps from input by index.
+      '-map', input.audioStreamIndex !== undefined
+        ? `0:a:${input.audioStreamIndex}`
+        : '0:a:0?',
+      ...NVENC_VIDEO_OUTPUT_FLAGS,
+      ...SW_PIX_FMT_YUV420P,
+      ...AAC_AUDIO_FLAGS,
+      ...hlsOutputFlags(cacheDir, mode),
+    ];
+  }
+
+  // Text-sub or no burn-in path: NVENC with CUDA decode.
   let vf: ReadonlyArray<string>;
   if (input.burnSubStreamIndex !== undefined) {
     const burn = buildBurnSubFilter(input.absPath, input.burnSubStreamIndex);
@@ -200,8 +254,6 @@ function buildModernHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArr
   } else {
     vf = SCALE_CUDA_TO_YUV420P;
   }
-  const mode = pickPlaylistMode(input);
-  const { inputSide, outputSide } = buildSeekArgs(input.startSeconds);
   return [
     '-loglevel', 'info',
     '-y',
@@ -217,16 +269,53 @@ function buildModernHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArr
   ];
 }
 
+/** Build the filter_complex graph for image-based subtitle burn-in. The
+ *  source's Nth subtitle stream is overlaid onto the video, producing a
+ *  labeled `[outv]` for the encoder.
+ *
+ *  PGS (Blu-ray) and dvb_subtitle decode to RGBA frames with timed
+ *  presentation. The `overlay` filter handles sparseness — segments where
+ *  no sub is showing pass the underlying video through unchanged. */
+function buildImageOverlayFilter(subIdx: number): string {
+  return `[0:v][0:s:${subIdx}]overlay[outv]`;
+}
+
 /** Legacy AVI (Xvid / packed-bitstream MPEG-4) → HLS. Software decode +
  *  NVENC encode + the same Xvid workaround set the existing nvenc-legacy-avi
  *  profile applies. */
 function buildLegacyAviHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArray<string> {
+  const mode = pickPlaylistMode(input);
+  const { inputSide, outputSide } = buildSeekArgs(input.startSeconds);
+
+  // Image-sub burn-in routes through filter_complex + overlay; same shape as
+  // the modern path's image branch, just with the Xvid workaround input flags.
+  if (input.burnSubStreamIndex !== undefined && input.burnSubTextBased === false) {
+    const filter = buildImageOverlayFilter(input.burnSubStreamIndex);
+    return [
+      '-loglevel', 'info',
+      '-y',
+      '-fflags', '+genpts',
+      '-bsf:v', 'mpeg4_unpack_bframes',
+      ...inputSide,
+      '-i', input.absPath,
+      ...outputSide,
+      '-filter_complex', filter,
+      '-map', '[outv]',
+      '-map', input.audioStreamIndex !== undefined
+        ? `0:a:${input.audioStreamIndex}`
+        : '0:a:0?',
+      ...NVENC_VIDEO_OUTPUT_FLAGS,
+      ...SW_PIX_FMT_YUV420P,
+      '-fps_mode', 'cfr',
+      ...AAC_AUDIO_FLAGS,
+      ...hlsOutputFlags(cacheDir, mode),
+    ];
+  }
+
   const burnVf =
     input.burnSubStreamIndex !== undefined
       ? ['-vf', buildBurnSubFilter(input.absPath, input.burnSubStreamIndex)]
       : [];
-  const mode = pickPlaylistMode(input);
-  const { inputSide, outputSide } = buildSeekArgs(input.startSeconds);
   return [
     '-loglevel', 'info',
     '-y',
@@ -248,12 +337,35 @@ function buildLegacyAviHlsArgs(input: PipelineInput, cacheDir: string): Readonly
 /** Legacy TS (MPEG-2 / VC-1) → HLS. Same shape as legacy AVI minus the
  *  Xvid-specific bitstream filter. */
 function buildLegacyTsHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArray<string> {
+  const mode = pickPlaylistMode(input);
+  const { inputSide, outputSide } = buildSeekArgs(input.startSeconds);
+
+  if (input.burnSubStreamIndex !== undefined && input.burnSubTextBased === false) {
+    const filter = buildImageOverlayFilter(input.burnSubStreamIndex);
+    return [
+      '-loglevel', 'info',
+      '-y',
+      '-fflags', '+genpts',
+      ...inputSide,
+      '-i', input.absPath,
+      ...outputSide,
+      '-filter_complex', filter,
+      '-map', '[outv]',
+      '-map', input.audioStreamIndex !== undefined
+        ? `0:a:${input.audioStreamIndex}`
+        : '0:a:0?',
+      ...NVENC_VIDEO_OUTPUT_FLAGS,
+      ...SW_PIX_FMT_YUV420P,
+      '-fps_mode', 'cfr',
+      ...AAC_AUDIO_FLAGS,
+      ...hlsOutputFlags(cacheDir, mode),
+    ];
+  }
+
   const burnVf =
     input.burnSubStreamIndex !== undefined
       ? ['-vf', buildBurnSubFilter(input.absPath, input.burnSubStreamIndex)]
       : [];
-  const mode = pickPlaylistMode(input);
-  const { inputSide, outputSide } = buildSeekArgs(input.startSeconds);
   return [
     '-loglevel', 'info',
     '-y',

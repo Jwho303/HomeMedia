@@ -15,26 +15,8 @@ afterAll(async () => {
   await fs.rm(goodDir, { recursive: true, force: true });
 });
 
-describe('config routes (0.1.7)', () => {
-  it('GET /api/config returns hlsPlayer:false by default', async () => {
-    const { resetConfigForTests } = await import('../../src/config.js');
-    delete process.env.HLS_PLAYER;
-    resetConfigForTests();
-    const { buildServer } = await import('../../src/server.js');
-    const app = await buildServer();
-    try {
-      const res = await app.inject({ method: 'GET', url: '/api/config' });
-      expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ hlsPlayer: false });
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('GET /api/config returns hlsPlayer:true when HLS_PLAYER=true', async () => {
-    const { resetConfigForTests } = await import('../../src/config.js');
-    process.env.HLS_PLAYER = 'true';
-    resetConfigForTests();
+describe('config routes (0.1.7 / Phase 4 cleanup)', () => {
+  it('GET /api/config returns hlsPlayer:true — HLS is the only path', async () => {
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();
     try {
@@ -43,15 +25,10 @@ describe('config routes (0.1.7)', () => {
       expect(res.json()).toEqual({ hlsPlayer: true });
     } finally {
       await app.close();
-      delete process.env.HLS_PLAYER;
-      resetConfigForTests();
     }
   });
 
-  it('GET /api/share/status no longer carries hlsPlayer', async () => {
-    const { resetConfigForTests } = await import('../../src/config.js');
-    process.env.HLS_PLAYER = 'true';
-    resetConfigForTests();
+  it('GET /api/share/status does not carry hlsPlayer', async () => {
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();
     try {
@@ -62,8 +39,6 @@ describe('config routes (0.1.7)', () => {
       expect(body).not.toHaveProperty('hlsPlayer');
     } finally {
       await app.close();
-      delete process.env.HLS_PLAYER;
-      resetConfigForTests();
     }
   });
 });

@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createOmdbSource } from '../../src/identify/sources/omdb.js';
+import {
+  createOmdbSource,
+  createOmdbRatingFetcher,
+  parseImdbRating,
+} from '../../src/identify/sources/omdb.js';
 import { createMemoryBudgetTracker } from '../../src/identify/budget.js';
 
 function fakeRequest(responses: Array<unknown>) {
@@ -147,5 +151,85 @@ describe('budget tracker', () => {
       b.consume();
     }
     expect(b.allow()).toBe(false);
+  });
+});
+
+// 0.1.8 — IMDb rating extraction. OMDb gives us the canonical /10 number
+// the same audience sees on imdb.com (TMDB's vote_average is its own
+// community score and runs ~0.5 higher; we don't use it for the pill).
+describe('parseImdbRating', () => {
+  it('extracts rating + comma-stripped vote count from a populated record', () => {
+    expect(parseImdbRating({ imdbRating: '7.8', imdbVotes: '1,234,567' }))
+      .toEqual({ rating: 7.8, votes: 1234567 });
+  });
+
+  it('returns null when imdbRating is "N/A" (OMDb-speak for missing)', () => {
+    expect(parseImdbRating({ imdbRating: 'N/A', imdbVotes: 'N/A' })).toBeNull();
+  });
+
+  it('returns null when imdbRating is missing entirely', () => {
+    expect(parseImdbRating({})).toBeNull();
+  });
+
+  it('returns the rating with null votes when imdbVotes is N/A but rating is present', () => {
+    expect(parseImdbRating({ imdbRating: '6.4', imdbVotes: 'N/A' }))
+      .toEqual({ rating: 6.4, votes: null });
+  });
+
+  it('rejects out-of-range ratings (defensive — OMDb shouldn\'t emit these)', () => {
+    expect(parseImdbRating({ imdbRating: '12.0' })).toBeNull();
+    expect(parseImdbRating({ imdbRating: '-1.5' })).toBeNull();
+    expect(parseImdbRating({ imdbRating: '0' })).toBeNull();
+  });
+
+  it('rejects malformed votes but preserves the rating', () => {
+    expect(parseImdbRating({ imdbRating: '8.1', imdbVotes: 'not a number' }))
+      .toEqual({ rating: 8.1, votes: null });
+  });
+});
+
+describe('createOmdbRatingFetcher', () => {
+  it('returns null for non-tt prefixed ids without spending budget', async () => {
+    const { fn, calls } = fakeRequest([{ Response: 'False', Error: 'Movie not found!' }]);
+    const budget = createMemoryBudgetTracker(10);
+    const f = createOmdbRatingFetcher({
+      apiKey: 'k', budget, fetch: fn as never, throttle: passthroughThrottle,
+    });
+    expect(await f.fetchRating('not-an-imdb-id')).toBeNull();
+    expect(calls).toEqual([]);  // never reached the network
+  });
+
+  it('returns the parsed rating + votes on a hit', async () => {
+    const { fn } = fakeRequest([
+      { Response: 'True', Title: 'Dune', imdbRating: '8.0', imdbVotes: '900,000' },
+    ]);
+    const f = createOmdbRatingFetcher({
+      apiKey: 'k',
+      budget: createMemoryBudgetTracker(10),
+      fetch: fn as never,
+      throttle: passthroughThrottle,
+    });
+    expect(await f.fetchRating('tt1160419')).toEqual({ rating: 8.0, votes: 900000 });
+  });
+
+  it('returns null when OMDb says the title isn\'t found', async () => {
+    const { fn } = fakeRequest([{ Response: 'False', Error: 'Movie not found!' }]);
+    const f = createOmdbRatingFetcher({
+      apiKey: 'k',
+      budget: createMemoryBudgetTracker(10),
+      fetch: fn as never,
+      throttle: passthroughThrottle,
+    });
+    expect(await f.fetchRating('tt0000000')).toBeNull();
+  });
+
+  it('returns null and stops calling when the budget is exhausted', async () => {
+    const { fn, calls } = fakeRequest([{ Response: 'True', imdbRating: '8.0' }]);
+    const budget = createMemoryBudgetTracker(1);   // limit = 0
+    const f = createOmdbRatingFetcher({
+      apiKey: 'k', budget, fetch: fn as never, throttle: passthroughThrottle,
+    });
+    expect(await f.fetchRating('tt1234567')).toBeNull();
+    expect(calls).toEqual([]);
   });
 });

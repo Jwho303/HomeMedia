@@ -26,6 +26,10 @@ export interface MediaItemRow {
   genres_json: string | null;
   /** Movies: TMDB runtime in seconds. Series: null (per-episode runtime lives on episodes). (0.1.3.2) */
   runtime_seconds: number | null;
+  /** IMDb /10 rating from OMDb's `imdbRating`; null until populated. (0.1.8) */
+  imdb_rating: number | null;
+  /** IMDb vote count from OMDb's `imdbVotes`; null until populated. (0.1.8) */
+  imdb_votes: number | null;
   mtime: number;
   scanned_at: number;
 }
@@ -116,6 +120,10 @@ export interface UpsertItemInput {
   genres_json?: string | null;
   /** Movies: TMDB runtime in seconds. undefined leaves any existing value. (0.1.3.2) */
   runtime_seconds?: number | null;
+  /** IMDb rating /10; undefined leaves any existing value. (0.1.8) */
+  imdb_rating?: number | null;
+  /** IMDb vote count; undefined leaves any existing value. (0.1.8) */
+  imdb_votes?: number | null;
   mtime: number;
   scanned_at: number;
 }
@@ -328,6 +336,9 @@ export function openDb(dbPath: string): DbHandle {
   // 0.1.3.2 home-screen metadata: genres + per-movie runtime.
   ensureColumn(db, 'media_items', 'genres_json', 'TEXT');
   ensureColumn(db, 'media_items', 'runtime_seconds', 'INTEGER');
+  // 0.1.8 IMDb rating cache from OMDb.
+  ensureColumn(db, 'media_items', 'imdb_rating', 'REAL');
+  ensureColumn(db, 'media_items', 'imdb_votes', 'INTEGER');
 
   // 0.1.1.2 backfill: every existing movie media_items row gets a media_files row at the
   // same path. Series rows DO NOT (their playable files live in `episodes`). Idempotent
@@ -352,8 +363,8 @@ export function openDb(dbPath: string): DbHandle {
     getEpisodeByPath: db.prepare<[string], EpisodeRow>(`SELECT * FROM episodes WHERE path = ?`),
 
     upsertItem: db.prepare<UpsertItemInput, MediaItemRow>(`
-      INSERT INTO media_items (path, type, tmdb_id, imdb_id, tvdb_id, title, year, poster_url, backdrop_url, overview, confidence, identification_json, genres_json, runtime_seconds, mtime, scanned_at)
-      VALUES (@path, @type, @tmdb_id, @imdb_id, @tvdb_id, @title, @year, @poster_url, @backdrop_url, @overview, @confidence, @identification_json, @genres_json, @runtime_seconds, @mtime, @scanned_at)
+      INSERT INTO media_items (path, type, tmdb_id, imdb_id, tvdb_id, title, year, poster_url, backdrop_url, overview, confidence, identification_json, genres_json, runtime_seconds, imdb_rating, imdb_votes, mtime, scanned_at)
+      VALUES (@path, @type, @tmdb_id, @imdb_id, @tvdb_id, @title, @year, @poster_url, @backdrop_url, @overview, @confidence, @identification_json, @genres_json, @runtime_seconds, @imdb_rating, @imdb_votes, @mtime, @scanned_at)
       ON CONFLICT(path) DO UPDATE SET
         type                = excluded.type,
         tmdb_id             = excluded.tmdb_id,
@@ -368,6 +379,8 @@ export function openDb(dbPath: string): DbHandle {
         identification_json = excluded.identification_json,
         genres_json         = COALESCE(excluded.genres_json, media_items.genres_json),
         runtime_seconds     = COALESCE(excluded.runtime_seconds, media_items.runtime_seconds),
+        imdb_rating         = COALESCE(excluded.imdb_rating, media_items.imdb_rating),
+        imdb_votes          = COALESCE(excluded.imdb_votes, media_items.imdb_votes),
         mtime               = excluded.mtime,
         scanned_at          = excluded.scanned_at
       RETURNING *
@@ -728,6 +741,8 @@ export function openDb(dbPath: string): DbHandle {
         identification_json: input.identification_json ?? null,
         genres_json: input.genres_json ?? null,
         runtime_seconds: input.runtime_seconds ?? null,
+        imdb_rating: input.imdb_rating ?? null,
+        imdb_votes: input.imdb_votes ?? null,
       });
       if (!row) throw new Error(`upsertItem returned no row for path=${input.path}`);
       return row;

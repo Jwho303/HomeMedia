@@ -130,6 +130,52 @@ describe('HlsSessionManager', () => {
     expect(session.state).toBe('killed');
   });
 
+  // The /touch heartbeat is the primary "session is alive" signal under
+  // the post-2026-04-27 architecture. A long-buffered hls.js client can
+  // skip segment fetches for >60s; the heartbeat keeps the session out
+  // of the GC's reach during those windows.
+  it('touch() bumps lastTouchedAt and saves the session from the GC', async () => {
+    let now = 1_000_000;
+    const spawnFn: HlsSpawn = () => fakeFFmpeg() as unknown as ReturnType<HlsSpawn>;
+    const mgr = new HlsSessionManager({
+      spawn: spawnFn,
+      cacheRoot,
+      now: () => now,
+      idleMs: 60_000,
+      gcIntervalMs: 0,
+    });
+
+    const session = await mgr.getOrCreate(
+      {
+        relPath: 'show/ep1.mkv',
+        absPath: '/m/show/ep1.mkv',
+        videoCodec: 'h264',
+        audioCodec: 'aac',
+        container: 'matroska,webm',
+      },
+      {},
+    );
+    // Advance 50s — within the 60s idle window. Touch lands.
+    now += 50_000;
+    mgr.touch(session.id);
+    // Advance another 50s. Total wallclock = 100s, but only 50s since
+    // the last touch — session should survive the GC.
+    now += 50_000;
+    mgr.gcIdle();
+    await new Promise((r) => setImmediate(r));
+    expect(mgr.liveCount()).toBe(1);
+    expect(session.state).not.toBe('killed');
+  });
+
+  it('touch() on an unknown session is a no-op (does not throw)', () => {
+    const mgr = new HlsSessionManager({
+      spawn: (() => fakeFFmpeg()) as unknown as HlsSpawn,
+      cacheRoot,
+      gcIntervalMs: 0,
+    });
+    expect(() => mgr.touch('00000000-0000-0000-0000-000000000000')).not.toThrow();
+  });
+
   it('delete() kills session and removes cache dir', async () => {
     const spawnFn: HlsSpawn = () => fakeFFmpeg() as unknown as ReturnType<HlsSpawn>;
     const mgr = new HlsSessionManager({ spawn: spawnFn, cacheRoot, gcIntervalMs: 0 });

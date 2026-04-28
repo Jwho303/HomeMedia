@@ -11,17 +11,14 @@ import { registerLibraryRoutes } from './routes/library.js';
 import { registerPlaybackRoutes } from './routes/playback.js';
 import { registerRefreshRoutes } from './routes/refresh.js';
 import { registerReprobeRoutes } from './routes/reprobe.js';
-import { registerStreamRoutes } from './routes/stream.js';
-import { registerStreamDiagnosticsRoutes } from './routes/stream-diagnostics.js';
-import { registerStreamMetaRoutes } from './routes/stream-meta.js';
 import { registerHlsRoutes } from './routes/hls.js';
+import { registerStreamMetaRoutes } from './routes/stream-meta.js';
 import { registerClientLogRoutes } from './routes/client-log.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerSubsRoutes } from './routes/subs.js';
 import { registerEmbeddedSubsRoutes } from './routes/embedded-subs.js';
 import { registerManualIdentifyRoutes } from './routes/manual-identify.js';
 import { shareGuard } from './middleware/share-guard.js';
-import { killAllRemuxProcesses } from './streaming.js';
 import { getHlsSessionManager } from './streaming/hls-session.js';
 import { detectEncoders } from './encoders.js';
 
@@ -94,18 +91,13 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     s.addHook('onRequest', shareGuard);
     await registerRefreshRoutes(s);
     await registerReprobeRoutes(s);
-    await registerStreamRoutes(s);
-    await registerStreamDiagnosticsRoutes(s);
-    // 0.1.6 — HLS routes registered unconditionally per D13. Client gates on
-    // the `hlsPlayer` flag in /api/share/status, not route existence.
-    await registerStreamMetaRoutes(s);
     await registerHlsRoutes(s);
+    await registerStreamMetaRoutes(s);
     await registerSubsRoutes(s);
     await registerEmbeddedSubsRoutes(s);
   });
 
   app.addHook('onClose', async () => {
-    killAllRemuxProcesses();
     await getHlsSessionManager().shutdownAll();
   });
 
@@ -158,7 +150,7 @@ export async function start(): Promise<void> {
   await app.listen({ host, port: config.port });
   status.configureListening(host, config.port);
   app.log.info(
-    { evt: 'startup', host, port: config.port, hlsPlayer: config.hlsPlayer },
+    { evt: 'startup', host, port: config.port },
     `homemedia listening on http://${host}:${config.port}`,
   );
 }

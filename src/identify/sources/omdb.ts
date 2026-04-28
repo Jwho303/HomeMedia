@@ -27,6 +27,10 @@ interface OmdbFull {
   imdbID: string;
   Plot?: string;
   Poster?: string;
+  /** "7.8" or "N/A". The IMDb /10 rating, the same number shown on imdb.com. */
+  imdbRating?: string;
+  /** "1,234,567" — comma-separated digits. */
+  imdbVotes?: string;
   Response: 'True' | 'False';
   Error?: string;
 }
@@ -123,4 +127,71 @@ export function createOmdbSource(deps: OmdbDeps): Source {
   };
 
   return source;
+}
+
+// ---------------------------------------------------------------------------
+// IMDb rating fetch (0.1.8)
+// ---------------------------------------------------------------------------
+
+export interface ImdbRating {
+  /** /10 rating, e.g. 7.8 */
+  rating: number;
+  /** Vote count; null when OMDb didn't have one. */
+  votes: number | null;
+}
+
+/** Parse OMDb's `imdbRating` / `imdbVotes` strings into numbers. Returns null
+ *  when the rating is missing or "N/A". Exported for unit tests. */
+export function parseImdbRating(data: { imdbRating?: string; imdbVotes?: string }): ImdbRating | null {
+  const r = (data.imdbRating ?? '').trim();
+  if (!r || r === 'N/A') return null;
+  const rating = Number(r);
+  if (!Number.isFinite(rating) || rating <= 0 || rating > 10) return null;
+  const v = (data.imdbVotes ?? '').trim();
+  if (!v || v === 'N/A') return { rating, votes: null };
+  // OMDb uses comma-separated thousands.
+  const votes = Number(v.replace(/,/g, ''));
+  if (!Number.isFinite(votes) || votes < 0) return { rating, votes: null };
+  return { rating, votes: Math.floor(votes) };
+}
+
+export interface OmdbRatingFetcher {
+  /** Fetch IMDb rating + votes for an IMDb id. Returns null on miss / quota /
+   *  network error — call site treats absence as "leave whatever's in the DB
+   *  alone". Budget-tracked. */
+  fetchRating(imdbId: string): Promise<ImdbRating | null>;
+}
+
+/** Standalone OMDb rating fetcher. Shares the same budget tracker as the
+ *  identification source so a heavy Pass B and a rating refresh can't blow
+ *  through the daily quota independently. */
+export function createOmdbRatingFetcher(deps: OmdbDeps): OmdbRatingFetcher {
+  const fetchFn = deps.fetch ?? request;
+  const limiter = pThrottle({ limit: 5, interval: 1000, strict: true });
+  const throttledRaw = (deps.throttle ?? limiter)(async (params: URLSearchParams): Promise<unknown> => {
+    const url = OMDB_BASE + '?' + params.toString();
+    const res = await fetchFn(url, { method: 'GET' });
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      const body = await res.body.text().catch(() => '');
+      throw new Error(`OMDb ${res.statusCode}: ${body.slice(0, 200)}`);
+    }
+    return await res.body.json();
+  });
+
+  return {
+    async fetchRating(imdbId: string): Promise<ImdbRating | null> {
+      if (!imdbId.startsWith('tt')) return null;
+      if (!deps.budget.allow()) return null;
+      const params = new URLSearchParams({ apikey: deps.apiKey, i: imdbId, plot: 'short' });
+      let data: OmdbFull;
+      try {
+        data = (await throttledRaw(params)) as OmdbFull;
+        deps.budget.consume();
+      } catch {
+        return null;
+      }
+      if (data.Response === 'False') return null;
+      return parseImdbRating(data);
+    },
+  };
 }

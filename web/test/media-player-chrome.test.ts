@@ -6,6 +6,19 @@ import {
   formatSeasonEpisode,
 } from '../src/components/media-player.js';
 
+// Stub hls.js so the HLS attach path doesn't trip Hls.isSupported()===false
+// under happy-dom (no MSE).
+vi.mock('hls.js', () => {
+  class HlsStub {
+    static isSupported(): boolean { return true; }
+    on(): void { /* no-op */ }
+    loadSource(): void { /* no-op */ }
+    attachMedia(): void { /* no-op */ }
+    destroy(): void { /* no-op */ }
+  }
+  return { default: HlsStub };
+});
+
 function mockJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -44,8 +57,25 @@ describe('media-player chrome / popover state', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
       const u = url as string;
       if (u.startsWith('/api/playback/')) return mockJson({ position: 0, duration: 0, watched: false });
+      // Phase 4: HLS-only player flow.
+      if (u.startsWith('/api/stream-meta/')) {
+        return mockJson({
+          relPath: 'X.mp4', absPath: '/m/X.mp4',
+          container: 'mp4', videoCodec: 'h264', audioCodec: 'aac',
+          durationSeconds: 0, audioStreams: [], subStreams: [], chapters: [], subs: [],
+        });
+      }
+      if (u.startsWith('/api/hls/')) {
+        return new Response('#EXTM3U\n', {
+          status: 200,
+          headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'x-hls-session-id': 'test-session' },
+        });
+      }
+      if (u.startsWith('/api/library')) return mockJson({ movies: [], series: [] });
+      if (u.startsWith('/api/series')) return mockJson({ series: { id: 0, episodes: [] }, episodes: [] });
       if (u.startsWith('/api/stream/')) return new Response('x', { status: 206 });
       if (u.startsWith('/api/subs-list/')) return mockJson({ subs: [] });
+      if (u.startsWith('/api/client-log')) return mockJson({}, 200);
       throw new Error(`unexpected ${u}`);
     });
   });

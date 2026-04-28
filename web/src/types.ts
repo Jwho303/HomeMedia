@@ -18,6 +18,10 @@ export interface LibraryItem {
   /** mtime; used for NEW badge + Date Added chunking. (0.1.3.2) */
   addedAt: number;
   lastPlayedAt: number | null;
+  /** IMDb /10 rating from OMDb. Null when unknown. (0.1.8) */
+  imdbRating: number | null;
+  /** IMDb vote count. Null when unknown. (0.1.8) */
+  imdbVotes: number | null;
 }
 
 export interface Library {

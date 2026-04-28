@@ -23,7 +23,10 @@
   --on-accent:         #ffffff;
 
   /* Status */
-  --watched:           #3b6d11;
+  /* Watched markers use the accent color so the whole "you've finished this"
+   * surface is on-brand instead of split between green and magenta. White
+   * checkmark stays for contrast on the saturated magenta fill. */
+  --watched:           var(--accent);
   --on-watched:        #ffffff;
   --error:             #ff453a;
   --on-error:          #ffffff;

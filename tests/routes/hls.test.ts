@@ -193,6 +193,65 @@ describe('hls routes', () => {
     }
   });
 
+  // Heartbeat: the player POSTs /touch every ~20s while playing so the
+  // server's idle GC doesn't reap a session whose client has buffered
+  // ahead and stopped fetching segments. 204 means the session is alive
+  // (and was just touched); 410 means the client should respawn.
+  it('POST /touch on a live session bumps lastTouchedAt and 204s', async () => {
+    const mgr = await setupFakes();
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const r1 = await app.inject({
+        method: 'GET',
+        url: `/api/hls/master.m3u8?path=${encodeURIComponent(FILENAME)}`,
+      });
+      const sessionId = r1.headers['x-hls-session-id'] as string;
+      const before = mgr.get(sessionId)!.lastTouchedAt;
+      // Sleep a tick so we can observe a different timestamp.
+      await new Promise((r) => setTimeout(r, 5));
+      const r2 = await app.inject({ method: 'POST', url: `/api/hls/${sessionId}/touch` });
+      expect(r2.statusCode).toBe(204);
+      const after = mgr.get(sessionId)!.lastTouchedAt;
+      expect(after).toBeGreaterThanOrEqual(before);
+    } finally {
+      await app.close();
+      await mgr.shutdownAll();
+    }
+  });
+
+  it('POST /touch on a session that was already deleted returns 410', async () => {
+    const mgr = await setupFakes();
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const r1 = await app.inject({
+        method: 'GET',
+        url: `/api/hls/master.m3u8?path=${encodeURIComponent(FILENAME)}`,
+      });
+      const sessionId = r1.headers['x-hls-session-id'] as string;
+      await mgr.delete(sessionId);
+      const r2 = await app.inject({ method: 'POST', url: `/api/hls/${sessionId}/touch` });
+      expect(r2.statusCode).toBe(410);
+      expect(r2.json()).toEqual({ error: 'session_gone' });
+    } finally {
+      await app.close();
+      await mgr.shutdownAll();
+    }
+  });
+
+  it('POST /touch with a malformed session id returns 400', async () => {
+    await setupFakes();
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'POST', url: '/api/hls/not-a-uuid/touch' });
+      expect(res.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects bad session id with 400', async () => {
     await setupFakes();
     const { buildServer } = await import('../../src/server.js');

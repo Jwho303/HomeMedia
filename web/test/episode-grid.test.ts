@@ -45,6 +45,8 @@ function detail(eps: Episode[]): SeriesDetail {
       watchedAt: null,
       addedAt: 0,
       lastPlayedAt: null,
+      imdbRating: null,
+      imdbVotes: null,
     },
     episodes: eps,
   };

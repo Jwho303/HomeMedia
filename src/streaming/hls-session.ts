@@ -75,7 +75,14 @@ interface ManagerOptions {
   /** Override `Date.now()` for tests. */
   now?: () => number;
   logger?: ManagerLogger;
-  /** Idle timeout in ms (default 60_000). */
+  /** Idle timeout in ms (default 5 * 60_000 = 5 minutes).
+   *  Note: with the client-side `/touch` heartbeat (every 20s while
+   *  playing), 5 minutes is a backstop — it's how long an unattended
+   *  session lingers when the player exited without firing the cleanup
+   *  beacon (network drop, hard browser crash, etc.). The previous 60s
+   *  was set when segment-read was the only liveness signal; it caused
+   *  spurious GCs when hls.js had buffered enough to skip segment fetches
+   *  for a minute or more. */
   idleMs?: number;
   /** GC tick interval in ms (default 30_000). 0 disables the timer. */
   gcIntervalMs?: number;
@@ -85,6 +92,10 @@ export interface CreateOptions {
   startSeconds?: number;
   audioStreamIndex?: number;
   burnSubStreamIndex?: number;
+  /** Hint passed through to `PipelineInput.burnSubTextBased`. Required when
+   *  `burnSubStreamIndex` is set; the route layer derives it from the probe's
+   *  `subStreams[i].textBased`. */
+  burnSubTextBased?: boolean;
 }
 
 const STDERR_RING = 50;
@@ -105,7 +116,7 @@ export class HlsSessionManager {
     this.cacheRoot = opts.cacheRoot ?? config.hlsCacheDir;
     this.now = opts.now ?? Date.now;
     this.logger = opts.logger ?? noopLogger;
-    this.idleMs = opts.idleMs ?? 60_000;
+    this.idleMs = opts.idleMs ?? 5 * 60_000;
     this.gcIntervalMs = opts.gcIntervalMs ?? 30_000;
     if (this.gcIntervalMs > 0) {
       this.gcTimer = setInterval(() => this.gcIdle(), this.gcIntervalMs);
@@ -114,7 +125,9 @@ export class HlsSessionManager {
     }
   }
 
-  /** Composite key for session reuse across requests. */
+  /** Composite key for session reuse across requests. The textBased flag
+   *  doesn't change identity — it's a derived property of the chosen
+   *  burnSubStreamIndex — so it's omitted from the key. */
   private sessionKey(relPath: string, opts: CreateOptions): string {
     return [
       relPath,
@@ -152,6 +165,7 @@ export class HlsSessionManager {
     if (opts.startSeconds !== undefined) pipelineInput.startSeconds = opts.startSeconds;
     if (opts.audioStreamIndex !== undefined) pipelineInput.audioStreamIndex = opts.audioStreamIndex;
     if (opts.burnSubStreamIndex !== undefined) pipelineInput.burnSubStreamIndex = opts.burnSubStreamIndex;
+    if (opts.burnSubTextBased !== undefined) pipelineInput.burnSubTextBased = opts.burnSubTextBased;
     // Thread duration through so `pickPlaylistMode()` can choose vod vs event.
     const inDur = (input as PipelineInput & { durationSeconds?: number }).durationSeconds;
     if (inDur !== undefined) {

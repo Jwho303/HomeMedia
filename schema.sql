@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS media_items (
   probe_json          TEXT,                   -- JSON: ffprobe result {container, videoCodec, audioCodec, durationSeconds} (0.1.4)
   genres_json         TEXT,                   -- JSON array of genre name strings from TMDB (0.1.3.2)
   runtime_seconds     INTEGER,                -- movies: TMDB runtime in seconds; null for series rows (0.1.3.2)
+  imdb_rating         REAL,                   -- IMDb /10 rating from OMDb's `imdbRating` (0.1.8)
+  imdb_votes          INTEGER,                -- IMDb vote count from OMDb's `imdbVotes` (0.1.8)
   mtime               INTEGER NOT NULL,
   scanned_at          INTEGER NOT NULL
 );

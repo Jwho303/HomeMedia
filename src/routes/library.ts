@@ -28,6 +28,11 @@ interface LibraryItemDto {
   watchedAt: number | null;
   addedAt: number;
   lastPlayedAt: number | null;
+  // 0.1.8 — IMDb rating /10 from OMDb. Null when unknown (no IMDb id mapped,
+  // no OMDb key, OMDb has no rating, or rating fetch hasn't run yet). The
+  // frontend renders a star pill in the top-left of the poster when present.
+  imdbRating: number | null;
+  imdbVotes: number | null;
 }
 
 function parseGenres(json: string | null): string[] {
@@ -67,6 +72,8 @@ function toDto(
     watchedAt: pb.watchedAt,
     addedAt: row.mtime,
     lastPlayedAt: pb.lastPlayedAt,
+    imdbRating: row.imdb_rating,
+    imdbVotes: row.imdb_votes,
   };
 }
 

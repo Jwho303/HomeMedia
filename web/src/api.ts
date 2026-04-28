@@ -4,11 +4,8 @@ import type {
   Episode,
   SeriesDetail,
   ShareStatus,
-  ServerConfig,
   Playback,
   PlaybackPostBody,
-  StreamProbe,
-  StreamDiagnostics,
   StreamMeta,
   SubInfo,
   ContinueResponse,
@@ -22,13 +19,6 @@ export class ShareOfflineError extends Error {
   constructor() {
     super('share_offline');
     this.name = 'ShareOfflineError';
-  }
-}
-
-export class EmptyFileError extends Error {
-  constructor() {
-    super('empty_file');
-    this.name = 'EmptyFileError';
   }
 }
 
@@ -62,31 +52,11 @@ export const apiContinue = async (): Promise<ContinueRow[]> => {
 export const apiShareStatus = (): Promise<ShareStatus> =>
   api<ShareStatus>('/api/share/status');
 
-/** 0.1.7 — `/api/config` is read-once on app boot. The HLS-player flag
- *  used to ride on every share-status response; this endpoint exists so
- *  the share poll stops doubling as the flag carrier. */
-export const apiConfig = (): Promise<ServerConfig> =>
-  api<ServerConfig>('/api/config');
-
-/** 0.1.7 — module-level cache for the server config. Populated lazily by
- *  `resolveHlsPlayerFlag()` (or eagerly by app boot if a future caller wants
- *  to). One fetch per page load. */
-let cachedConfig: ServerConfig | null = null;
-/** Resolve the HLS player flag — fetch `/api/config` once if not cached.
- *  Returns `false` if the request fails (graceful degrade to the legacy
- *  player path). */
+/** Phase 4 (post-0.1.6): HLS is the only player path. The legacy probe-and-
+ *  decide flow that this flag used to gate is gone. The function is kept
+ *  as a stable async API for callers that already await it on mount. */
 export async function resolveHlsPlayerFlag(): Promise<boolean> {
-  if (cachedConfig) return cachedConfig.hlsPlayer;
-  try {
-    cachedConfig = await apiConfig();
-  } catch {
-    cachedConfig = { hlsPlayer: false };
-  }
-  return cachedConfig.hlsPlayer;
-}
-/** Test-only: clear the cached config so successive tests can mock fresh fetches. */
-export function resetCachedConfigForTests(): void {
-  cachedConfig = null;
+  return true;
 }
 
 export const apiReconnect = (): Promise<ShareStatus> =>
@@ -161,9 +131,6 @@ export const apiReprobeItem = (id: number): Promise<ReprobeKickoff> =>
 export const apiReprobeEpisode = (id: number): Promise<ReprobeKickoff> =>
   api<ReprobeKickoff>(`/api/reprobe-episode/${id}`, { method: 'POST' });
 
-export const streamUrl = (relPath: string): string =>
-  `/api/stream/${encodeURIComponent(relPath)}`;
-
 /** 0.1.6 — HLS playlist URL for a path. The relPath rides as `?path=…`
  *  because Fastify's router requires wildcards in the last URL segment.
  *  Caller may pass start/audio/burnSub overrides. */
@@ -200,6 +167,29 @@ export function hlsBeaconUrl(sessionId: string): string {
   return `/api/hls/${sessionId}/delete`;
 }
 
+/** Heartbeat ping. The player fires this every ~20s while playing so
+ *  the server's idle GC doesn't reap a session whose client has buffered
+ *  enough to skip segment fetches for a minute or more. Returns 204 when
+ *  the session is alive, 410 when it's gone (caller should respawn). */
+export function hlsTouchUrl(sessionId: string): string {
+  return `/api/hls/${sessionId}/touch`;
+}
+
+export type HlsTouchOutcome = 'alive' | 'gone' | 'error';
+
+/** POST a heartbeat to /touch. Treats network errors as `error` (transient,
+ *  not session-gone) and 410 as `gone` (session was GCed; respawn). */
+export async function hlsTouch(sessionId: string): Promise<HlsTouchOutcome> {
+  try {
+    const r = await fetch(hlsTouchUrl(sessionId), { method: 'POST' });
+    if (r.status === 204) return 'alive';
+    if (r.status === 410) return 'gone';
+    return 'error';
+  } catch {
+    return 'error';
+  }
+}
+
 /** 0.1.6 — GET /api/stream-meta/:relPath (read-only probe metadata for the
  *  HLS player UI). */
 export const apiStreamMeta = (relPath: string): Promise<StreamMeta> =>
@@ -212,65 +202,6 @@ export const subsUrl = (relPath: string): string =>
  *  server and converted to WebVTT. */
 export const embeddedSubsUrl = (relPath: string, streamIndex: number): string =>
   `/api/embedded-subs/${encodeURIComponent(relPath)}?stream=${streamIndex}`;
-
-/**
- * Pre-probe a stream URL with a 1-byte Range request. Three outcomes:
- *  - 206/200 → direct play (server is happy to stream the file as-is)
- *  - 415 + JSON body → server signals remux/external; subs[] also present
- *  - 503 share_offline → throws ShareOfflineError
- *  - anything else → throws Error
- */
-export async function apiStreamProbe(relPath: string): Promise<StreamProbe> {
-  const r = await fetch(streamUrl(relPath), {
-    method: 'GET',
-    headers: { Range: 'bytes=0-0' },
-  });
-  if (r.status === 503) {
-    const body = await r.json().catch(() => ({}));
-    if ((body as { error?: string }).error === 'share_offline') {
-      throw new ShareOfflineError();
-    }
-  }
-  if (r.status === 404) {
-    const body = await r.json().catch(() => ({}));
-    if ((body as { error?: string }).error === 'empty_file') {
-      throw new EmptyFileError();
-    }
-  }
-  if (r.status === 206 || r.status === 200) {
-    // Drain & discard the 1-byte body so the connection can be reused.
-    try { await r.arrayBuffer(); } catch { /* ignore */ }
-    return { decision: 'direct', subs: [] };
-  }
-  if (r.status === 415) {
-    const body = (await r.json().catch(() => ({}))) as Partial<StreamProbe>;
-    const result: StreamProbe = {
-      decision: body.decision ?? 'external',
-      subs: body.subs ?? [],
-    };
-    if (body.absPath) result.absPath = body.absPath;
-    if (typeof body.durationSeconds === 'number' && body.durationSeconds > 0) {
-      result.durationSeconds = body.durationSeconds;
-    }
-    if (body.container) result.container = body.container;
-    if (body.videoCodec) result.videoCodec = body.videoCodec;
-    if (body.audioCodec) result.audioCodec = body.audioCodec;
-    if (body.accel) result.accel = body.accel;
-    if (body.preferAccel === 'nvenc') result.preferAccel = 'nvenc';
-    if (body.profile) result.profile = body.profile;
-    if (body.audioStreams) result.audioStreams = body.audioStreams;
-    if (body.subStreams) result.subStreams = body.subStreams;
-    if (body.chapters) result.chapters = body.chapters;
-    return result;
-  }
-  throw new Error(`stream probe failed: ${r.status} ${r.statusText}`);
-}
-
-/** Fetch the read-only stream diagnostics (0.1.4.2). Returns the probe +
- *  chosen profile + would-be ffmpeg args without spawning ffmpeg. */
-export async function apiStreamDiagnostics(relPath: string): Promise<StreamDiagnostics> {
-  return api<StreamDiagnostics>(`/api/stream-diagnostics/${encodeURIComponent(relPath)}`);
-}
 
 /** 0.1.5.2 — Search TMDB for manual-identify candidates. The optional
  *  `signal` lets the modal abort an in-flight request when the user retypes

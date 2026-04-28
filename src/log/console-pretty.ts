@@ -129,6 +129,19 @@ export const DEFAULT_SUPPRESS: SuppressionEntry[] = [
       e.url.startsWith('/api/hls/master.m3u8') &&
       e.statusCode === 200,
   },
+  // The player heartbeats /touch every ~20s while playing. On a 2-hour
+  // movie that's 360 lines of "yes, still playing" — collapse them in
+  // the rendered console (the JSON file still records every ping for
+  // diagnostics). Only the 204 "alive" path is hidden; 410 / 400 stay
+  // visible because they signal session-gone or a malformed client request.
+  {
+    label: 'hls.touch',
+    match: (e) =>
+      e.evt === 'response' &&
+      typeof e.url === 'string' &&
+      /^\/api\/hls\/[a-f0-9-]+\/touch$/i.test(e.url) &&
+      e.statusCode === 204,
+  },
 ];
 
 export interface PrettyOptions {

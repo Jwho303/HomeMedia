@@ -1,5 +1,5 @@
 import { loadConfig, ConfigError } from '../config.js';
-import { scan, dryRun, ShareOfflineError } from '../scan.js';
+import { scan, dryRun, refreshRatings, ShareOfflineError } from '../scan.js';
 
 const consoleLogger = {
   info: (msg: string) => console.log(msg),
@@ -7,10 +7,23 @@ const consoleLogger = {
   error: (msg: string) => console.error(`x ${msg}`),
 };
 
-function parseArgs(argv: string[]): { full: boolean; dryRun: boolean } {
+interface CliOptions {
+  full: boolean;
+  dryRun: boolean;
+  /** 0.1.8 — refresh-ratings catch-up pass: walks the existing library and
+   *  populates `imdb_rating` for any identified row that doesn't already
+   *  have one. Doesn't touch identification. */
+  refreshRatings: boolean;
+  /** With --refresh-ratings, refetch even rows that already have a rating. */
+  refreshRatingsForce: boolean;
+}
+
+function parseArgs(argv: string[]): CliOptions {
   return {
     full: argv.includes('--full'),
     dryRun: argv.includes('--dry-run'),
+    refreshRatings: argv.includes('--refresh-ratings'),
+    refreshRatingsForce: argv.includes('--refresh-ratings-force'),
   };
 }
 
@@ -80,6 +93,23 @@ async function main(): Promise<number> {
 
   if (opts.dryRun) {
     return runDryRun(cfg.mediaRoot);
+  }
+
+  if (opts.refreshRatings) {
+    console.log(`refreshing IMDb ratings${opts.refreshRatingsForce ? ' (force)' : ''}...`);
+    try {
+      const r = await refreshRatings(
+        { force: opts.refreshRatingsForce },
+        { logger: consoleLogger },
+      );
+      console.log(
+        `${r.considered} considered, ${r.updated} updated, ${r.skipped} already had a rating, ${r.missed} no rating, ${r.resolved} imdb ids resolved.`,
+      );
+      return 0;
+    } catch (err) {
+      console.error(`refresh-ratings failed: ${(err as Error).message}`);
+      return 1;
+    }
   }
 
   console.log(`scanning ${cfg.mediaRoot}${opts.full ? ' (full)' : ''}...`);
