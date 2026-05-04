@@ -12,6 +12,7 @@ import {
   PlayerCapacityError,
   ShareOfflineError,
   subsUrl,
+  type PlayerOpenInput,
 } from '../api.js';
 import { PlayerSession, mintPlayerId } from './player-session.js';
 import type { CapacityExceeded, PlayerOpenResponse } from '../types.js';
@@ -783,10 +784,6 @@ export class MediaPlayer extends LitElement {
       background: rgba(255,255,255,0.08);
       margin: 6px 4px;
     }
-    .pip-row {
-      padding: 4px 4px 0;
-    }
-
     .error {
       position: absolute;
       inset: 0;
@@ -981,6 +978,15 @@ export class MediaPlayer extends LitElement {
    *  non-null, the player renders the "Encoder busy" panel instead of the
    *  video. */
   @state() private capacityError: CapacityExceeded | null = null;
+  /** True while the <video> is in browser PiP. Drives the player-bar button's
+   *  active state and lets us reflect external PiP exits in the UI. */
+  @state() private pipActive = false;
+  /** True between an episode auto-advance/change and the next `loadedmetadata`
+   *  if PiP was active when the change started. The PiP window is bound to the
+   *  old MediaSource and the browser drops out of PiP when hls.js re-attaches;
+   *  this flag tells the new-stream handler to re-enter PiP once metadata for
+   *  the next episode is ready. */
+  private resumePipOnNextLoad = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private bufferedRaf: number | null = null;
   private bufferedLastTick = 0;
@@ -991,12 +997,20 @@ export class MediaPlayer extends LitElement {
   private watchedFired = false;
   private resumePosition = 0;
   private resumed = false;
+  /** Set in `onEnded` when we navigate to the next episode. Tells the next
+   *  /open call to pass `startSeconds: 0` so a stale playback row doesn't
+   *  spawn ffmpeg into the middle of the new episode. Cleared after consumption. */
+  private skipResumeOnNextOpen = false;
 
   private get videoEl(): HTMLVideoElement | null {
     return this.renderRoot.querySelector('video');
   }
   private get gridEl(): HTMLElement | null {
     return this.renderRoot.querySelector('episode-grid');
+  }
+  private get pipSupported(): boolean {
+    const d = document as Document & { pictureInPictureEnabled?: boolean };
+    return d.pictureInPictureEnabled === true;
   }
 
   override connectedCallback(): void {
@@ -1065,6 +1079,17 @@ export class MediaPlayer extends LitElement {
       // permanent loading state because `probedFor` is already set.
       if (previous !== undefined && previous !== this.relPath) {
         this.trace('updated.relPathChange', { previous, next: this.relPath });
+        // If PiP was active when the episode changed, the browser drops out
+        // of PiP as soon as hls.js re-attaches a new MediaSource to the
+        // <video>. Latch the intent here so `onLoadedMetadata` can re-enter
+        // PiP for the new stream. (Capture from the doc rather than our
+        // `pipActive` flag — the leave event may already have flipped it.)
+        const docPip = document as Document & {
+          pictureInPictureElement?: Element | null;
+        };
+        if (this.pipActive || docPip.pictureInPictureElement === this.videoEl) {
+          this.resumePipOnNextLoad = true;
+        }
         this.watchedFired = false;
         this.resumePosition = 0;
         this.resumed = false;
@@ -1242,9 +1267,13 @@ export class MediaPlayer extends LitElement {
     this.probing = true;
 
     const playerId = this.playerSessionCtl?.playerId ?? mintPlayerId();
+    const skipResume = this.skipResumeOnNextOpen;
+    this.skipResumeOnNextOpen = false;
     let bundle: PlayerOpenResponse;
     try {
-      bundle = await apiPlayerOpen(playerId, { relPath: this.relPath });
+      const openInput: PlayerOpenInput = { relPath: this.relPath };
+      if (skipResume) openInput.startSeconds = 0;
+      bundle = await apiPlayerOpen(playerId, openInput);
     } catch (err) {
       if (err instanceof PlayerCapacityError) {
         this.capacityError = err.body;
@@ -1434,6 +1463,15 @@ export class MediaPlayer extends LitElement {
     this.applyVolumePrefs();
     this.applyActiveSubtitle();
     this.armSilentDecodeWatchdog();
+    if (this.resumePipOnNextLoad) {
+      this.resumePipOnNextLoad = false;
+      const vp = v as HTMLVideoElement & {
+        requestPictureInPicture?: () => Promise<unknown>;
+      };
+      if (vp.requestPictureInPicture && document.pictureInPictureElement !== v) {
+        vp.requestPictureInPicture().catch(() => {});
+      }
+    }
     this.trace('onLoadedMetadata.done', this.playerSnapshot());
   };
 
@@ -1700,6 +1738,13 @@ export class MediaPlayer extends LitElement {
     // hop is not a separate back-step. Back from any episode lands on the
     // series view, not the previous episode.
     if (next) {
+      // Auto-advance always starts the next episode at 0 — bypass any stale
+      // playback_state row that might still hold a position from an earlier
+      // partial watch. Without this, marking the next episode "unwatched"
+      // before letting the previous one auto-advance can land in the middle
+      // of the episode if the row's position survived (e.g. row was rewritten
+      // by a stray POST after the kebab clear).
+      this.skipResumeOnNextOpen = true;
       navigate(playHref(next.path), { replace: true });
     } else {
       navigate(seriesHref(series.series.id), { replace: true });
@@ -1836,13 +1881,19 @@ export class MediaPlayer extends LitElement {
     this.toggleFullscreen();
   };
 
-  /** Close any open popover when the click landed outside the player. */
+  /** Close any open popover when the click landed outside the trigger.
+   *  Clicks on a popover-anchor (its trigger button or popover content) are
+   *  ignored — those handle their own toggling via stopPropagation. Clicks
+   *  anywhere else (the video, scrubber, top bar, page outside the player)
+   *  close the open popover. */
   private onDocClick = (e: MouseEvent): void => {
     if (this.openPopover === null) return;
     const path = e.composedPath();
-    // Anything inside the player frame is "inside" — popovers + triggers handle
-    // their own toggling via stopPropagation in their click handlers.
-    if (path.includes(this)) return;
+    for (const node of path) {
+      if (node instanceof HTMLElement && node.classList.contains('popover-anchor')) {
+        return;
+      }
+    }
     this.openPopover = null;
   };
 
@@ -2018,10 +2069,33 @@ export class MediaPlayer extends LitElement {
     const v = this.videoEl as HTMLVideoElement & {
       requestPictureInPicture?: () => Promise<unknown>;
     } | null;
-    if (!v?.requestPictureInPicture) return;
+    if (!v) return;
+    const doc = document as Document & {
+      pictureInPictureElement?: Element | null;
+      exitPictureInPicture?: () => Promise<void>;
+    };
+    if (doc.pictureInPictureElement === v && doc.exitPictureInPicture) {
+      void doc.exitPictureInPicture().catch(() => {});
+      return;
+    }
+    if (!v.requestPictureInPicture) return;
     void v.requestPictureInPicture().catch(() => {});
     this.openPopover = null;
   }
+
+  private onEnterPip = (): void => {
+    this.pipActive = true;
+  };
+
+  /** Browser fired `leavepictureinpicture`. Two cases:
+   *   - User-initiated exit: just clear the flag.
+   *   - Episode change: hls.js's `attachMedia` swap drops us out of PiP. We
+   *     can't tell the cases apart from this event alone, so we rely on
+   *     `resumePipOnNextLoad` (set in `updated` when relPath changes while
+   *     `pipActive` is true) to re-enter PiP after the next `loadedmetadata`. */
+  private onLeavePip = (): void => {
+    this.pipActive = false;
+  };
 
   private setPlaybackRate(rate: number): void {
     this.playbackRate = rate;
@@ -2093,6 +2167,8 @@ export class MediaPlayer extends LitElement {
         @emptied=${this.onTraceEvent}
         @ended=${this.onEnded}
         @error=${this.onError}
+        @enterpictureinpicture=${this.onEnterPip}
+        @leavepictureinpicture=${this.onLeavePip}
         @click=${this.onVideoClick}
         @dblclick=${this.onVideoDblClick}
       >
@@ -2414,6 +2490,18 @@ export class MediaPlayer extends LitElement {
               </div>
             `
           : null}
+        ${this.pipSupported
+          ? html`
+              <button
+                class=${`icon-btn${this.pipActive ? ' active' : ''}`}
+                title=${this.pipActive ? 'Exit picture-in-picture' : 'Picture-in-picture'}
+                @click=${(e: Event): void => {
+                  e.stopPropagation();
+                  this.onPipClick();
+                }}
+              >${iconPip()}</button>
+            `
+          : null}
         <div class="popover-anchor">
           <button
             class=${`icon-btn${popKey === 'settings' ? ' active' : ''}`}
@@ -2643,16 +2731,6 @@ export class MediaPlayer extends LitElement {
                 <span class="check-mark">${iconCheck()}</span>
               </button>
             `)}
-          </div>
-          <div class="menu-divider"></div>
-          <div class="pip-row menu-list">
-            <button style="--stagger-index:0" @click=${(): void => this.onPipClick()}>
-              <span style="display:flex;align-items:center;gap:8px;">
-                <span style="width:16px;height:16px;display:inline-flex;">${iconPip()}</span>
-                Picture-in-picture
-              </span>
-              <span class="check-mark">${iconCheck()}</span>
-            </button>
           </div>
         </div>
       </player-popover>

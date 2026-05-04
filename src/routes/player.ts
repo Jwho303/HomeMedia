@@ -290,11 +290,19 @@ export async function registerPlayerRoutes(app: FastifyInstance): Promise<void> 
     }
     const burnSubTextBased = burnRes === null ? undefined : burnRes;
 
-    // Resume position when client didn't override startSeconds.
+    // Resume position when client didn't override startSeconds. A finished
+    // episode's row keeps its end-of-file position so list-views can show the
+    // watched badge, but using that position as ffmpeg's spawn offset would
+    // skip the next play into the credits (or, if the row was rewound by a
+    // user "Mark unwatched" then re-touched by a stray write, into wherever
+    // the stale position points). Gate on watched=false so only genuinely
+    // in-progress rows resume.
     let startSeconds = parsed.data.startSeconds ?? 0;
     if (parsed.data.startSeconds === undefined) {
       const pb = getDb().getPlayback(parsed.data.relPath);
-      if (pb && pb.position_seconds > 0) startSeconds = pb.position_seconds;
+      if (pb && pb.position_seconds > 0 && pb.watched === 0) {
+        startSeconds = pb.position_seconds;
+      }
     }
 
     const identity = getIdentity(req);
