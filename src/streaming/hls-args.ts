@@ -186,21 +186,40 @@ function canRemuxHlsCopy(input: PipelineInput): boolean {
  *  packets the muxer needs for keyframe alignment. The codec being copied
  *  IS the source's existing h264, which already has its own clean keyframe
  *  layout, so input-side seek is safe here. */
+/** True when the source container can carry an `edts` edit list and uses
+ *  AVCC framing for h264 — i.e. ISO BMFF families (MP4/MOV/M4V). MKV and
+ *  matroska families have no edit list and h264 is already Annex-B. The
+ *  `-ignore_editlist` and `-bsf:v h264_mp4toannexb` flags are MP4-only
+ *  and ffmpeg errors out at startup if you pass them to a non-MP4 input. */
+function isMp4LikeContainer(container: string): boolean {
+  return /\b(mov|mp4|m4a|m4v|3gp|3g2|mj2|isom)\b/i.test(container);
+}
+
 function buildRemuxHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArray<string> {
   const mode = pickPlaylistMode(input);
+  const isMp4 = isMp4LikeContainer(input.container);
   // 0.1.9.1 — `-ignore_editlist 1` BEFORE `-i`. YTS-style MP4s carry an
   // `edts` edit list whose first entry can be a 90-second silence/preroll;
   // by default the MP4 demuxer applies the edit list and emits frames with
-  // PTS shifted by the edit-list offset. ffmpeg's HLS muxer then numbers
-  // segments by floor(pts / hls_time) → first written segment is
-  // seg-00015 (or wherever) instead of seg-00000, and hls.js fetches a
-  // playlist whose timeline doesn't match the segment filenames →
-  // DEMUXER_ERROR_COULD_NOT_PARSE on the first seek out of buffer.
-  // Ignoring the edit list keeps PTS starting at 0.
-  const inputSide: string[] = ['-ignore_editlist', '1'];
+  // PTS shifted by the offset. ffmpeg's HLS muxer then numbers segments
+  // by floor(pts / hls_time) → first written segment is seg-00015
+  // instead of seg-00000, and hls.js fails with
+  // DEMUXER_ERROR_COULD_NOT_PARSE on any out-of-buffer seek.
+  //
+  // 0.1.9.2 — guard with isMp4 so passing this to a Matroska/WebM
+  // demuxer doesn't crash ffmpeg at startup with "Option ignore_editlist
+  // not found".
+  const inputSide: string[] = isMp4 ? ['-ignore_editlist', '1'] : [];
   if (input.startSeconds && input.startSeconds > 0) {
     inputSide.push('-ss', String(Math.floor(input.startSeconds)));
   }
+  // 0.1.9.1 — h264 in MP4 uses AVCC framing (length-prefixed NALUs);
+  // mpegts needs Annex-B (start-code-prefixed). ffmpeg usually inserts
+  // the BSF automatically but the auto-insertion is unreliable across
+  // copy/seek combinations. Force it explicitly for MP4 inputs only —
+  // MKV's h264 is already Annex-B and the BSF would be a no-op or
+  // worse confuse the muxer.
+  const videoBsf: string[] = isMp4 ? ['-bsf:v', 'h264_mp4toannexb'] : [];
   return [
     '-loglevel', 'info',
     '-y',
@@ -209,11 +228,7 @@ function buildRemuxHlsArgs(input: PipelineInput, cacheDir: string): ReadonlyArra
     ...buildMapArgs(input.audioStreamIndex),
     '-c:v', 'copy',
     '-c:a', 'copy',
-    // 0.1.9.1 — h264 in MP4 uses AVCC framing (length-prefixed NALUs);
-    // mpegts needs Annex-B (start-code-prefixed). ffmpeg usually inserts
-    // h264_mp4toannexb automatically, but the auto-insertion is
-    // unreliable across copy/seek combinations. Force the BSF explicitly.
-    '-bsf:v', 'h264_mp4toannexb',
+    ...videoBsf,
     // Belt-and-suspenders: rebase any leftover negative PTS to zero.
     '-avoid_negative_ts', 'make_zero',
     ...hlsOutputFlags(cacheDir, mode),

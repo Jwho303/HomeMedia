@@ -95,7 +95,8 @@ function applyMovie(
              runtime_seconds = COALESCE(?, runtime_seconds),
              imdb_rating = COALESCE(?, imdb_rating),
              imdb_votes  = COALESCE(?, imdb_votes),
-             scanned_at = ?
+             scanned_at = ?,
+             deleted_at = NULL
          WHERE id = ?`,
       )
       .run(
@@ -176,7 +177,8 @@ async function applySeriesEpisode(
              genres_json = COALESCE(?, genres_json),
              imdb_rating = COALESCE(?, imdb_rating),
              imdb_votes  = COALESCE(?, imdb_votes),
-             scanned_at = ?
+             scanned_at = ?,
+             deleted_at = NULL
          WHERE id = ?`,
       )
       .run(

@@ -66,6 +66,7 @@ describe('SSE refresh-progress', () => {
       deps?.progress?.emit({ type: 'file', i: 2, n: 2, path: 'b.mkv', phase: 'identify' });
       return {
         added: 1, updated: 0, stale: 0, errors: 0, scanned: 3, needsReview: 0,
+        disappeared: 0, resurrected: 0, runId: 1,
       };
     });
 
@@ -93,6 +94,7 @@ describe('SSE refresh-progress', () => {
     const { setScanForTests } = await import('../../src/routes/refresh.js');
     setScanForTests(async () => ({
       added: 5, updated: 1, stale: 0, errors: 0, scanned: 6, needsReview: 0,
+      disappeared: 0, resurrected: 0, runId: 1,
     }));
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();
@@ -136,7 +138,7 @@ describe('SSE refresh-progress', () => {
     });
     setScanForTests(async () => {
       await slow;
-      return { added: 0, updated: 0, stale: 0, errors: 0, scanned: 0, needsReview: 0 };
+      return { added: 0, updated: 0, stale: 0, errors: 0, scanned: 0, needsReview: 0, disappeared: 0, resurrected: 0, runId: 1 };
     });
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();

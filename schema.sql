@@ -1,6 +1,23 @@
 -- HomeMedia schema. Idempotent; safe to apply on every open.
 -- Source of truth referenced by 0.1.1 D4.
 
+-- 0.1.10 — every refresh opens a row here. `latestRunAt` is derived from
+-- MAX(finished_at WHERE status='ok'); `deleted_at` timestamps on media rows
+-- are set to the run's `started_at`, giving a stable cross-reference.
+CREATE TABLE IF NOT EXISTS scan_runs (
+  id                 INTEGER PRIMARY KEY,
+  started_at         INTEGER NOT NULL,
+  finished_at        INTEGER,                 -- NULL while running
+  status             TEXT NOT NULL,           -- 'running' | 'ok' | 'error'
+  mode               TEXT NOT NULL,           -- 'smart' | 'hard' | 'reprobe-item' | …
+  files_walked       INTEGER,
+  files_dirty        INTEGER,
+  files_disappeared  INTEGER,
+  files_resurrected  INTEGER,
+  error_message      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_status ON scan_runs(status);
+
 CREATE TABLE IF NOT EXISTS media_items (
   id                  INTEGER PRIMARY KEY,
   path                TEXT UNIQUE NOT NULL,   -- POSIX relative, e.g. 'The Bear/S01E01.mkv' for movies, 'The Bear' for series

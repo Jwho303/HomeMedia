@@ -32,6 +32,11 @@ export interface MediaItemRow {
   imdb_votes: number | null;
   mtime: number;
   scanned_at: number;
+  /** 0.1.10 — set to the scan_runs.started_at of the run that observed this row's
+   *  path missing from disk. NULL means "alive". Cleared on resurrection.
+   *  Optional on the type to keep test fixtures concise; SQLite always populates
+   *  it (defaulted to NULL on existing rows by the additive migration). */
+  deleted_at?: number | null;
 }
 
 /** Per-item playback aggregate, returned by `listLibraryWithPlayback` (0.1.3.2).
@@ -72,6 +77,8 @@ export interface MediaFileRow {
   path: string;
   mtime: number;
   scanned_at: number;
+  /** 0.1.10 — soft-delete tombstone. NULL means "alive". */
+  deleted_at?: number | null;
 }
 
 export interface UpsertMediaFileInput {
@@ -96,6 +103,8 @@ export interface EpisodeRow {
   runtime_seconds: number | null;
   mtime: number;
   scanned_at: number;
+  /** 0.1.10 — soft-delete tombstone. NULL means "alive". */
+  deleted_at?: number | null;
 }
 
 /** Episode joined with optional playback_state row, returned by getSeries (0.1.3.1). */
@@ -200,6 +209,8 @@ export interface ReviewItemRow {
   candidates: string;
   added_at: number;
   scanned_at: number;
+  /** 0.1.10 — soft-delete tombstone. NULL means "alive". */
+  deleted_at?: number | null;
 }
 
 export interface AudioStream {
@@ -258,6 +269,29 @@ export interface ProbeResult {
   chapters?: Chapter[];
 }
 
+/** 0.1.10 — one row per scan lifecycle. `started_at` is the canonical
+ *  timestamp written into `deleted_at` columns when a path goes missing. */
+export interface ScanRunRow {
+  id: number;
+  started_at: number;
+  finished_at: number | null;
+  status: 'running' | 'ok' | 'error';
+  mode: string;
+  files_walked: number | null;
+  files_dirty: number | null;
+  files_disappeared: number | null;
+  files_resurrected: number | null;
+  error_message: string | null;
+}
+
+/** Counts persisted on a successful scan_runs row close. (0.1.10) */
+export interface ScanRunCounts {
+  filesWalked?: number;
+  filesDirty?: number;
+  filesDisappeared?: number;
+  filesResurrected?: number;
+}
+
 export interface DbHandle {
   raw: Database.Database;
   getByPath(path: string): MediaItemRow | undefined;
@@ -271,7 +305,9 @@ export interface DbHandle {
   listLibraryWithPlayback(opts?: { includeStale?: boolean }): MediaItemWithPlayback[];
   /** In-progress items, mixed movies + series, ordered by recency. (0.1.3.2) */
   getContinueWatching(limit?: number): ContinueRow[];
-  latestScannedAt(): number;
+  /** 0.1.10 — `MAX(scan_runs.finished_at WHERE status='ok')` (or 0). Replaces
+   *  the legacy `MAX(media_items.scanned_at)` freshness reference. */
+  latestRunAt(): number;
   upsertReviewItem(input: ReviewItemInput): ReviewItemRow;
   getReviewItem(path: string): ReviewItemRow | undefined;
   clearReviewItem(path: string): void;
@@ -295,6 +331,14 @@ export interface DbHandle {
   getMediaFilesForItem(itemId: number): MediaFileRow[];
   getMediaFileByPath(path: string): MediaFileRow | undefined;
   deleteMediaFile(path: string): void;
+  /** 0.1.10 — open a scan_runs row with status='running'. Returns the row id. */
+  openScanRun(mode: string): number;
+  /** 0.1.10 — close a scan_runs row with status='ok' and finished_at=now. */
+  closeScanRunOk(runId: number, counts: ScanRunCounts): void;
+  /** 0.1.10 — close a scan_runs row with status='error' and finished_at=now. */
+  closeScanRunError(runId: number, message: string): void;
+  /** 0.1.10 — fetch a scan_runs row by id (mostly for tests). */
+  getScanRun(runId: number): ScanRunRow | undefined;
   close(): void;
 }
 
@@ -339,6 +383,24 @@ export function openDb(dbPath: string): DbHandle {
   // 0.1.8 IMDb rating cache from OMDb.
   ensureColumn(db, 'media_items', 'imdb_rating', 'REAL');
   ensureColumn(db, 'media_items', 'imdb_votes', 'INTEGER');
+  // 0.1.10 soft-delete tombstones. Default NULL on existing rows = "alive".
+  ensureColumn(db, 'media_items', 'deleted_at', 'INTEGER');
+  ensureColumn(db, 'episodes', 'deleted_at', 'INTEGER');
+  ensureColumn(db, 'media_files', 'deleted_at', 'INTEGER');
+  ensureColumn(db, 'needs_review', 'deleted_at', 'INTEGER');
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_media_items_deleted_at ON media_items(deleted_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_episodes_deleted_at    ON episodes(deleted_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_media_files_deleted_at ON media_files(deleted_at)`);
+
+  // 0.1.10 — sweep orphan running rows from a previous server crash. A
+  // status='running' row at startup means the server died mid-scan and
+  // never closed it; mark as error so latestRunAt() (which only counts
+  // 'ok') stays accurate.
+  db.prepare(
+    `UPDATE scan_runs
+     SET status = 'error', error_message = 'server_restart', finished_at = ?
+     WHERE status = 'running'`,
+  ).run(Date.now());
 
   // 0.1.1.2 backfill: every existing movie media_items row gets a media_files row at the
   // same path. Series rows DO NOT (their playable files live in `episodes`). Idempotent
@@ -382,7 +444,8 @@ export function openDb(dbPath: string): DbHandle {
         imdb_rating         = COALESCE(excluded.imdb_rating, media_items.imdb_rating),
         imdb_votes          = COALESCE(excluded.imdb_votes, media_items.imdb_votes),
         mtime               = excluded.mtime,
-        scanned_at          = excluded.scanned_at
+        scanned_at          = excluded.scanned_at,
+        deleted_at          = NULL
       RETURNING *
     `),
 
@@ -400,7 +463,8 @@ export function openDb(dbPath: string): DbHandle {
         identification_json = excluded.identification_json,
         runtime_seconds     = COALESCE(excluded.runtime_seconds, episodes.runtime_seconds),
         mtime               = excluded.mtime,
-        scanned_at          = excluded.scanned_at
+        scanned_at          = excluded.scanned_at,
+        deleted_at          = NULL
       RETURNING *
     `),
 
@@ -410,21 +474,26 @@ export function openDb(dbPath: string): DbHandle {
       ON CONFLICT(path) DO UPDATE SET
         reason     = excluded.reason,
         candidates = excluded.candidates,
-        scanned_at = excluded.scanned_at
+        scanned_at = excluded.scanned_at,
+        deleted_at = NULL
       RETURNING *
     `),
     getReview: db.prepare<[string], ReviewItemRow>(`SELECT * FROM needs_review WHERE path = ?`),
     clearReview: db.prepare<[string]>(`DELETE FROM needs_review WHERE path = ?`),
-    listReview: db.prepare<[], ReviewItemRow>(`SELECT * FROM needs_review ORDER BY added_at DESC`),
+    listReview: db.prepare<[], ReviewItemRow>(
+      `SELECT * FROM needs_review WHERE deleted_at IS NULL ORDER BY added_at DESC`,
+    ),
 
     getSeriesItem: db.prepare<[number], MediaItemRow>(
-      `SELECT * FROM media_items WHERE id = ? AND type = 'series'`,
+      `SELECT * FROM media_items WHERE id = ? AND type = 'series' AND deleted_at IS NULL`,
     ),
     getEpisodes: db.prepare<[number], EpisodeRow>(
-      `SELECT * FROM episodes WHERE series_id = ? ORDER BY season ASC, episode ASC`,
+      `SELECT * FROM episodes WHERE series_id = ? AND deleted_at IS NULL ORDER BY season ASC, episode ASC`,
     ),
     /** Episodes for a series, joined with their playback_state row (if any). The
-     *  playback columns are aliased so they remain distinguishable from episode columns. */
+     *  playback columns are aliased so they remain distinguishable from episode columns.
+     *  0.1.10 — filters `deleted_at IS NULL` so soft-deleted episodes don't appear
+     *  in the series-detail view. */
     getEpisodesWithPlayback: db.prepare<
       [number],
       EpisodeRow & {
@@ -445,7 +514,7 @@ export function openDb(dbPath: string): DbHandle {
              ps.updated_at       AS pb_updated_at
       FROM episodes e
       LEFT JOIN playback_state ps ON ps.path = e.path
-      WHERE e.series_id = ?
+      WHERE e.series_id = ? AND e.deleted_at IS NULL
       ORDER BY e.season ASC, e.episode ASC
     `),
 
@@ -455,11 +524,12 @@ export function openDb(dbPath: string): DbHandle {
       ON CONFLICT(path) DO UPDATE SET
         item_id    = excluded.item_id,
         mtime      = excluded.mtime,
-        scanned_at = excluded.scanned_at
+        scanned_at = excluded.scanned_at,
+        deleted_at = NULL
       RETURNING *
     `),
     getMediaFilesForItem: db.prepare<[number], MediaFileRow>(
-      `SELECT * FROM media_files WHERE item_id = ? ORDER BY path`,
+      `SELECT * FROM media_files WHERE item_id = ? AND deleted_at IS NULL ORDER BY path`,
     ),
     getMediaFileByPath: db.prepare<[string], MediaFileRow>(
       `SELECT * FROM media_files WHERE path = ?`,
@@ -488,12 +558,16 @@ export function openDb(dbPath: string): DbHandle {
       `SELECT path FROM episodes WHERE series_id = ?`,
     ),
 
+    /** 0.1.10 — `listAll` returns every row including soft-deleted (used by
+     *  search/admin via `includeStale=true`). The default home path uses
+     *  `listAlive` which filters `deleted_at IS NULL`. */
     listAll: db.prepare<[], MediaItemRow>(`SELECT * FROM media_items ORDER BY title ASC`),
-    listFresh: db.prepare<[number], MediaItemRow>(
-      `SELECT * FROM media_items WHERE scanned_at >= ? ORDER BY title ASC`,
+    listAlive: db.prepare<[], MediaItemRow>(
+      `SELECT * FROM media_items WHERE deleted_at IS NULL ORDER BY title ASC`,
     ),
-    latestScannedAt: db.prepare<[], { v: number | null }>(
-      `SELECT MAX(scanned_at) AS v FROM media_items`,
+    /** 0.1.10 — freshness reference is the latest successful scan_runs row. */
+    latestRunAt: db.prepare<[], { v: number | null }>(
+      `SELECT MAX(finished_at) AS v FROM scan_runs WHERE status = 'ok'`,
     ),
 
     /**
@@ -506,7 +580,10 @@ export function openDb(dbPath: string): DbHandle {
      *   pb_watched:                   movies → playback.watched; series → 1 iff every episode is watched
      *   pb_watched_at:                most recent watched_at across the item's playback rows
      *   pb_last_played_at:            movies → playback_state.updated_at; series → MAX over episodes
-     * Stale-filter (scanned_at >= ?) is applied by the caller via WHERE binding.
+     * 0.1.10: the alive/all distinction is `deleted_at IS NULL` rather than the
+     * legacy `scanned_at >= MAX(scanned_at)` predicate. Series episode aggregates
+     * also gate on `e.deleted_at IS NULL` so soft-deleted episodes don't count
+     * against a series's watched-totals.
      * (0.1.3.2)
      */
     listLibraryAggAll: db.prepare<
@@ -550,12 +627,13 @@ export function openDb(dbPath: string): DbHandle {
                MAX(ps.updated_at)    AS max_updated_at
         FROM episodes e
         LEFT JOIN playback_state ps ON ps.path = e.path
+        WHERE e.deleted_at IS NULL
         GROUP BY e.series_id
       ) ep_agg ON mi.type = 'series' AND ep_agg.series_id = mi.id
       ORDER BY mi.title ASC
     `),
-    listLibraryAggFresh: db.prepare<
-      [number],
+    listLibraryAggAlive: db.prepare<
+      [],
       MediaItemRow & {
         pb_position: number | null;
         pb_duration: number | null;
@@ -595,9 +673,10 @@ export function openDb(dbPath: string): DbHandle {
                MAX(ps.updated_at)    AS max_updated_at
         FROM episodes e
         LEFT JOIN playback_state ps ON ps.path = e.path
+        WHERE e.deleted_at IS NULL
         GROUP BY e.series_id
       ) ep_agg ON mi.type = 'series' AND ep_agg.series_id = mi.id
-      WHERE mi.scanned_at >= ?
+      WHERE mi.deleted_at IS NULL
       ORDER BY mi.title ASC
     `),
 
@@ -641,6 +720,7 @@ export function openDb(dbPath: string): DbHandle {
         FROM media_items mi
         JOIN playback_state ps ON ps.path = mi.path
         WHERE mi.type = 'movie'
+          AND mi.deleted_at IS NULL
           AND ps.watched = 0
           AND ps.duration_seconds > 0
           AND ps.position_seconds > 0
@@ -661,6 +741,8 @@ export function openDb(dbPath: string): DbHandle {
         JOIN episodes e ON e.series_id = mi.id
         JOIN playback_state ps ON ps.path = e.path
         WHERE mi.type = 'series'
+          AND mi.deleted_at IS NULL
+          AND e.deleted_at IS NULL
           AND ps.watched = 0
           AND ps.duration_seconds > 0
           AND ps.position_seconds > 0
@@ -724,6 +806,29 @@ export function openDb(dbPath: string): DbHandle {
     setProbeMediaFile: db.prepare<[string, string]>(
       `UPDATE media_items SET probe_json = ?
        WHERE id = (SELECT item_id FROM media_files WHERE path = ?)`,
+    ),
+
+    // 0.1.10 — scan_runs lifecycle.
+    insertScanRun: db.prepare<[number, string], { id: number }>(
+      `INSERT INTO scan_runs (started_at, status, mode) VALUES (?, 'running', ?)
+       RETURNING id`,
+    ),
+    closeScanRunOk: db.prepare<
+      [number, number | null, number | null, number | null, number | null, number]
+    >(
+      `UPDATE scan_runs
+       SET finished_at = ?, status = 'ok',
+           files_walked = ?, files_dirty = ?,
+           files_disappeared = ?, files_resurrected = ?
+       WHERE id = ?`,
+    ),
+    closeScanRunError: db.prepare<[number, string, number]>(
+      `UPDATE scan_runs
+       SET finished_at = ?, status = 'error', error_message = ?
+       WHERE id = ?`,
+    ),
+    getScanRun: db.prepare<[number], ScanRunRow>(
+      `SELECT * FROM scan_runs WHERE id = ?`,
     ),
   };
 
@@ -879,18 +984,12 @@ export function openDb(dbPath: string): DbHandle {
     },
     listLibrary: (opts) => {
       if (opts?.includeStale) return stmts.listAll.all();
-      const latest = handle.latestScannedAt();
-      if (latest === 0) return [];
-      return stmts.listFresh.all(latest);
+      return stmts.listAlive.all();
     },
     listLibraryWithPlayback: (opts) => {
       const rows = opts?.includeStale
         ? stmts.listLibraryAggAll.all()
-        : (() => {
-            const latest = handle.latestScannedAt();
-            if (latest === 0) return [];
-            return stmts.listLibraryAggFresh.all(latest);
-          })();
+        : stmts.listLibraryAggAlive.all();
       return rows.map((r) => {
         const {
           pb_position,
@@ -934,7 +1033,26 @@ export function openDb(dbPath: string): DbHandle {
         return out;
       });
     },
-    latestScannedAt: () => stmts.latestScannedAt.get()?.v ?? 0,
+    latestRunAt: () => stmts.latestRunAt.get()?.v ?? 0,
+    openScanRun: (mode) => {
+      const row = stmts.insertScanRun.get(Date.now(), mode);
+      if (!row) throw new Error(`openScanRun: no id returned`);
+      return row.id;
+    },
+    closeScanRunOk: (runId, counts) => {
+      stmts.closeScanRunOk.run(
+        Date.now(),
+        counts.filesWalked ?? null,
+        counts.filesDirty ?? null,
+        counts.filesDisappeared ?? null,
+        counts.filesResurrected ?? null,
+        runId,
+      );
+    },
+    closeScanRunError: (runId, message) => {
+      stmts.closeScanRunError.run(Date.now(), message, runId);
+    },
+    getScanRun: (id) => stmts.getScanRun.get(id),
     getManualOverride: (p) => stmts.getOverride.get(p),
     setManualOverride: (input) => {
       const row = stmts.setOverride.get({

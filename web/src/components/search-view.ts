@@ -175,6 +175,22 @@ export class SearchView extends LitElement {
       text-overflow: ellipsis;
     }
     .year { font-size: 11px; color: var(--text-secondary); }
+
+    /* 0.1.10 — dimmed tile for soft-deleted rows surfaced via includeStale. */
+    .tile.stale .frame { opacity: 0.55; filter: grayscale(0.4); }
+    .tile.stale .title,
+    .tile.stale .year { color: var(--text-tertiary); }
+    .stale-badge {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      background: var(--scrim-strong);
+      color: var(--on-scrim);
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: var(--radius-xs);
+      letter-spacing: 0.3px;
+    }
   `;
 
   @state() private query: string = '';
@@ -256,6 +272,11 @@ export class SearchView extends LitElement {
   }
 
   private onTileClick(item: LibraryItem): void {
+    // 0.1.10 — soft-deleted rows are listed for searchability but their
+    // playable file isn't on disk; navigating to the player would 404 the
+    // stream route. Series rows still navigate to detail (so the user can
+    // see what episodes existed); movies are non-clickable until restored.
+    if (item.deletedAt != null && item.type === 'movie') return;
     if (item.type === 'series') {
       navigate(seriesHref(item.id));
     } else {
@@ -309,8 +330,12 @@ export class SearchView extends LitElement {
   private renderTile(item: LibraryItem): unknown {
     const title = item.title ?? item.path;
     const ratingLabel = formatImdbRating(item.imdbRating);
+    const stale = item.deletedAt != null;
     return html`
-      <button class="tile" @click=${(): void => this.onTileClick(item)}>
+      <button
+        class=${stale ? 'tile stale' : 'tile'}
+        @click=${(): void => this.onTileClick(item)}
+      >
         <div class="frame">
           ${item.posterUrl
             ? html`<img src=${item.posterUrl} alt=${title} loading="lazy" />`
@@ -324,6 +349,7 @@ export class SearchView extends LitElement {
               </span>`
             : null}
           <span class="badge">${item.type}</span>
+          ${stale ? html`<span class="stale-badge">not on disk</span>` : null}
         </div>
         <div class="meta">
           <div class="title" title=${title}>${title}</div>

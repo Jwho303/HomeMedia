@@ -353,9 +353,23 @@ export class PlayerSession {
         this.heartbeatPaused,
       );
       if (r.status === 'gone') {
-        // The server forgot us (idle GC, restart, something). Treat as a
-        // soft reseek to the current position to revive.
-        await this.seek(this.absoluteTime());
+        // The server forgot us (idle GC, restart, race with /delete from
+        // a previous episode-change). Try one revive via /seek to the
+        // current position. If that also fails, give up — the heartbeat
+        // would otherwise hammer the server with 410/404 forever (the
+        // user can hard-refresh to mint a fresh playerId).
+        try {
+          await this.seek(this.absoluteTime());
+        } catch {
+          // fall through
+        }
+        if (this.state === 'error') {
+          // eslint-disable-next-line no-console
+          console.warn('[player-session] heartbeat revive failed, stopping', {
+            playerId: this.playerId,
+          });
+          this.stopHeartbeat();
+        }
         return;
       }
       this.encodedWindow = r.encodedWindow;

@@ -341,10 +341,19 @@ export async function registerPlayerRoutes(app: FastifyInstance): Promise<void> 
 
     // Wait for first segment so the bundle's encodedWindow reflects something.
     const hlsMgr = getHlsSessionManager();
-    const ok = await hlsMgr.waitForPlaylist(opened.player.activeSession!.id, 30_000);
+    const session = opened.player.activeSession!;
+    const ok = await hlsMgr.waitForPlaylist(session.id, 30_000);
     if (!ok) {
       req.log.error(
-        { evt: 'player.openSpawnError', playerId, relPath: parsed.data.relPath },
+        {
+          evt: 'player.openSpawnError',
+          playerId,
+          relPath: parsed.data.relPath,
+          sessionId: session.id,
+          state: session.state,
+          ffmpegArgs: session.ffmpegArgs,
+          stderrTail: session.recentStderr.slice(-20),
+        },
         'hls playlist did not appear in time',
       );
       await mgr.retireSession(opened.player);
@@ -424,6 +433,18 @@ export async function registerPlayerRoutes(app: FastifyInstance): Promise<void> 
     mgr.setActiveSession(player, session);
     const ok = await hlsMgr.waitForPlaylist(session.id, 30_000);
     if (!ok) {
+      req.log.error(
+        {
+          evt: 'player.seekSpawnError',
+          playerId,
+          relPath: player.relPath,
+          sessionId: session.id,
+          state: session.state,
+          ffmpegArgs: session.ffmpegArgs,
+          stderrTail: session.recentStderr.slice(-20),
+        },
+        'hls playlist did not appear in time after seek-respawn',
+      );
       await mgr.retireSession(player);
       return reply.code(500).send({ error: 'hls_unavailable' });
     }
@@ -527,6 +548,18 @@ export async function registerPlayerRoutes(app: FastifyInstance): Promise<void> 
     const hlsMgr = getHlsSessionManager();
     const ok = await hlsMgr.waitForPlaylist(session.id, 30_000);
     if (!ok) {
+      req.log.error(
+        {
+          evt: 'player.tracksSpawnError',
+          playerId,
+          relPath: player.relPath,
+          sessionId: session.id,
+          state: session.state,
+          ffmpegArgs: session.ffmpegArgs,
+          stderrTail: session.recentStderr.slice(-20),
+        },
+        'hls playlist did not appear in time after tracks-respawn',
+      );
       await mgr.retireSession(player);
       return reply.code(500).send({ error: 'hls_unavailable' });
     }

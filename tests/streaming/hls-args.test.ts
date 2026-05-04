@@ -166,6 +166,24 @@ describe('buildHlsArgs()', () => {
     expect(args).not.toContain('-copyts');
   });
 
+  it('remux-copy on Matroska does NOT pass MP4-only flags (0.1.9.2 — ffmpeg crashes if you do)', () => {
+    // -ignore_editlist and -bsf:v h264_mp4toannexb are MP4 demuxer /
+    // AVCC-framing specific. Passing them to a Matroska/WebM input
+    // makes ffmpeg exit at startup with "Option ignore_editlist not
+    // found" or worse confuses the muxer with an unnecessary BSF.
+    const { args } = buildHlsArgs(
+      input({
+        container: 'matroska,webm',
+        videoCodec: 'h264',
+        audioCodec: 'aac',
+        durationSeconds: 1320,
+      }),
+      CACHE,
+    );
+    expect(args).not.toContain('-ignore_editlist');
+    expect(args).not.toContain('-bsf:v');
+  });
+
   it('remux-copy path uses naive input-side seek (no lead/lag, -c:v copy cannot drop frames)', () => {
     const { args } = buildHlsArgs(
       input({

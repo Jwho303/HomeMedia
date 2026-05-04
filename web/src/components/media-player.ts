@@ -1087,18 +1087,26 @@ export class MediaPlayer extends LitElement {
         this.libraryFetchedFor = null;
         this.failureLog = [];
         this.autoReportedExternalFor = null;
-        // 0.1.9 Phase 5 — tear down the prior session controller and
-        // reopen against the new relPath. The server's per-IP
-        // single-player rule turns this into a media-swap on the same
-        // playerId.
-        if (this.playerSessionCtl) {
-          void this.playerSessionCtl.close(true).catch(() => undefined);
-          this.playerSessionCtl = null;
-        }
+        // 0.1.9.2 — episode change: AWAIT the close before starting the
+        // new /open. With sendBeacon (or even an unawaited fetch), the
+        // delete can land AFTER the new /open, wiping the freshly
+        // spawned session and triggering an unrecoverable 410/404
+        // heartbeat cycle.
+        const oldCtl = this.playerSessionCtl;
+        this.playerSessionCtl = null;
         this.playerBundle = null;
         this.serverEncodedWindow = { from: 0, to: 0 };
-        void this.fetchResume();
-        this.runPlayerSessionBootstrap();
+        void (async () => {
+          if (oldCtl) {
+            try {
+              await oldCtl.close(false);
+            } catch {
+              /* server may already be gone — fall through to /open */
+            }
+          }
+          void this.fetchResume();
+          this.runPlayerSessionBootstrap();
+        })();
         void this.resolveTitleSource();
       }
     }

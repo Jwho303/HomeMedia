@@ -152,7 +152,7 @@ describe('reprobe routes', () => {
     });
     const releaseScanRef: { current: (() => void) | null } = { current: null };
     setScanForTests(() => new Promise((resolve) => {
-      releaseScanRef.current = (): void => resolve({ added: 0, updated: 0, stale: 0, errors: 0, scanned: 0, needsReview: 0 });
+      releaseScanRef.current = (): void => resolve({ added: 0, updated: 0, stale: 0, errors: 0, scanned: 0, needsReview: 0, disappeared: 0, resurrected: 0, runId: 1 });
     }));
 
     const { buildServer } = await import('../../src/server.js');

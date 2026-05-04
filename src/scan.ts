@@ -75,6 +75,9 @@ export interface ScanOptions {
 export interface ScanResult {
   added: number;
   updated: number;
+  /** @deprecated 0.1.10 — see `disappeared` and `resurrected`. Kept on the
+   *  response for one release for clients that still read it; computed as
+   *  `disappeared` for back-compat. */
   stale: number;
   errors: number;
   scanned: number;
@@ -86,6 +89,12 @@ export interface ScanResult {
   /** 0.1.4.3 — number of files for which the prober ran during this scan
    *  (i.e. ProbeStatus === 'reprobed'). Stays 0 on a no-change refresh. */
   probed?: number;
+  /** 0.1.10 — paths that flipped from alive → deleted_at != NULL on this run. */
+  disappeared: number;
+  /** 0.1.10 — paths that flipped from deleted_at != NULL → NULL on this run. */
+  resurrected: number;
+  /** 0.1.10 — the scan_runs row id, useful for diagnostics + the SSE done event. */
+  runId: number;
 }
 
 export interface ScanLogger {
@@ -232,6 +241,136 @@ function bumpScannedAtForFiles(db: DbHandle, files: FileEntry[], startedAt: numb
   tx(files);
 }
 
+/** 0.1.10 — counts produced by the reconcile pass. */
+export interface ReconcileCounts {
+  disappeared: number;
+  resurrected: number;
+}
+
+/**
+ * 0.1.10 — reconcile DB state against the on-disk path set.
+ *
+ * - For every path the DB knows about that is NOT in `allFiles`: set
+ *   `deleted_at = runStartedAt` (only on rows where `deleted_at IS NULL`).
+ * - For every path that IS in `allFiles` but currently has `deleted_at != NULL`:
+ *   clear it back to NULL (resurrection).
+ * - Run a parent-aliveness recompute: `media_items.deleted_at` is set when
+ *   every child (episodes for series, media_files for movies) has
+ *   `deleted_at IS NOT NULL`; cleared when at least one child is alive.
+ *
+ * Caller is expected to invoke this inside a `db.raw.transaction(...)` so
+ * the home view never observes a half-reconciled state.
+ *
+ * Pure-ish: reads `allFiles`, writes only via the passed-in db. Returns the
+ * counts so the caller can populate `ScanResult`.
+ */
+export function reconcile(
+  db: DbHandle,
+  allFiles: FileEntry[],
+  runStartedAt: number,
+): ReconcileCounts {
+  const onDisk = new Set(allFiles.map((f) => f.relPosix));
+  // Track the set of distinct paths that flipped this run, deduped across
+  // tables (a movie at path X can sit in both media_items AND media_files;
+  // a single disk delete shouldn't double-count).
+  const disappearedPaths = new Set<string>();
+  const resurrectedPaths = new Set<string>();
+
+  // Per-table soft-delete + resurrect, applied to the tables whose `path`
+  // column is always a file path that `walk()` returns. `media_items.path`
+  // is intentionally skipped here because for series and foldered movies
+  // it's a folder (or synthetic) path, never a file — those rows are
+  // (re)tombstoned by the parent-aliveness recompute below based on whether
+  // any of their children survived.
+  const tables: Array<{ name: string; key: string }> = [
+    { name: 'episodes', key: 'path' },
+    { name: 'media_files', key: 'path' },
+    { name: 'needs_review', key: 'path' },
+  ];
+
+  for (const tbl of tables) {
+    const rows = db.raw
+      .prepare<[], { path: string; deleted_at: number | null }>(
+        `SELECT ${tbl.key} AS path, deleted_at FROM ${tbl.name}`,
+      )
+      .all();
+    const setDeleted = db.raw.prepare<[number, string]>(
+      `UPDATE ${tbl.name} SET deleted_at = ? WHERE ${tbl.key} = ? AND deleted_at IS NULL`,
+    );
+    const clearDeleted = db.raw.prepare<[string]>(
+      `UPDATE ${tbl.name} SET deleted_at = NULL WHERE ${tbl.key} = ? AND deleted_at IS NOT NULL`,
+    );
+    for (const r of rows) {
+      const inDisk = onDisk.has(r.path);
+      if (!inDisk && r.deleted_at == null) {
+        const res = setDeleted.run(runStartedAt, r.path);
+        if (res.changes > 0) disappearedPaths.add(r.path);
+        continue;
+      }
+      if (inDisk && r.deleted_at != null) {
+        const res = clearDeleted.run(r.path);
+        if (res.changes > 0) resurrectedPaths.add(r.path);
+      }
+    }
+  }
+
+  // Parent recompute. A series row is alive iff at least one alive episode
+  // exists; a movie row is alive iff at least one alive media_files row
+  // exists. Set deleted_at where no alive child; clear where an alive child
+  // exists. The `runStartedAt` value is used for newly-set parents so they
+  // share a timestamp with the children that triggered the cascade.
+  db.raw
+    .prepare<[number]>(
+      `UPDATE media_items
+       SET deleted_at = ?
+       WHERE type = 'series'
+         AND deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM episodes e
+           WHERE e.series_id = media_items.id AND e.deleted_at IS NULL
+         )`,
+    )
+    .run(runStartedAt);
+  db.raw
+    .prepare<[]>(
+      `UPDATE media_items
+       SET deleted_at = NULL
+       WHERE type = 'series'
+         AND deleted_at IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM episodes e
+           WHERE e.series_id = media_items.id AND e.deleted_at IS NULL
+         )`,
+    )
+    .run();
+  db.raw
+    .prepare<[number]>(
+      `UPDATE media_items
+       SET deleted_at = ?
+       WHERE type = 'movie'
+         AND deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM media_files mf
+           WHERE mf.item_id = media_items.id AND mf.deleted_at IS NULL
+         )`,
+    )
+    .run(runStartedAt);
+  db.raw
+    .prepare<[]>(
+      `UPDATE media_items
+       SET deleted_at = NULL
+       WHERE type = 'movie'
+         AND deleted_at IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM media_files mf
+           WHERE mf.item_id = media_items.id AND mf.deleted_at IS NULL
+         )`,
+    )
+    .run();
+
+  return { disappeared: disappearedPaths.size, resurrected: resurrectedPaths.size };
+}
+
 /** Mutable monotonic counter used to drive SSE `file` / `probe` events. The
  *  denominator covers identify+persist+probe phases per file × the number of
  *  files in the scan. We tick once per emitted event so the user sees the
@@ -315,13 +454,13 @@ function stripTmdbPosterBase(stored: string | null): string | null {
 }
 
 function buildLibraryLookup(db: DbHandle): LibraryLookup {
-  const startedAt = db.latestScannedAt();
-  // Pull every non-stale series row up-front (cheap; bounded by library size).
+  // 0.1.10 — use the explicit alive predicate rather than the legacy
+  // `scanned_at >= MAX(scanned_at)` stale gate.
   const rows = db.raw
-    .prepare<[number], MediaItemRow>(
-      `SELECT * FROM media_items WHERE type = 'series' AND scanned_at >= ? AND tmdb_id IS NOT NULL`,
+    .prepare<[], MediaItemRow>(
+      `SELECT * FROM media_items WHERE type = 'series' AND deleted_at IS NULL AND tmdb_id IS NOT NULL`,
     )
-    .all(startedAt);
+    .all();
   return (seedTitle: string): LibraryMatch[] => {
     if (!seedTitle) return [];
     const out: LibraryMatch[] = [];
@@ -369,7 +508,15 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
   const s = await share(mediaRoot);
   if (!s.online) throw new ShareOfflineError(mediaRoot);
 
-  const startedAt = Date.now();
+  // 0.1.10 — open scan_runs row before any DB writes. The row's `started_at`
+  // is the canonical timestamp for any `deleted_at` set by this scan's
+  // reconcile pass. Closed in a finally below; on uncaught errors we close
+  // it as 'error' so latestRunAt() (which only counts 'ok') stays accurate.
+  const mode = opts.full ? 'hard' : 'smart';
+  const runId = db.openScanRun(mode);
+  const runRow = db.getScanRun(runId);
+  const startedAt = runRow?.started_at ?? Date.now();
+
   const result: ScanResult = {
     added: 0,
     updated: 0,
@@ -380,6 +527,53 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
     rescuedByPassB: 0,
     manualOverridesApplied: 0,
     probed: 0,
+    disappeared: 0,
+    resurrected: 0,
+    runId,
+  };
+
+  try {
+    return await runScan(opts, deps, db, mediaRoot, t, log, source, progress, ratingFetcher, runId, startedAt, result);
+  } catch (err) {
+    db.closeScanRunError(runId, (err as Error).message ?? 'scan_failed');
+    throw err;
+  }
+}
+
+async function runScan(
+  opts: ScanOptions,
+  deps: ScanDeps,
+  db: DbHandle,
+  mediaRoot: string,
+  t: TmdbDeps,
+  log: ScanLogger,
+  source: Source,
+  progress: ProgressEmitter | undefined,
+  ratingFetcher: RatingDeps | null,
+  runId: number,
+  startedAt: number,
+  result: ScanResult,
+): Promise<ScanResult> {
+  // Local helper that runs reconcile + parent-recompute in one transaction
+  // and updates the result counts. Called at exactly one point on every
+  // exit path (no early returns skip it).
+  const runReconcile = (allFiles: FileEntry[]): void => {
+    const reconcileTx = db.raw.transaction((files: FileEntry[]) => {
+      return reconcile(db, files, startedAt);
+    });
+    const counts = reconcileTx(allFiles);
+    result.disappeared = counts.disappeared;
+    result.resurrected = counts.resurrected;
+    // Back-compat: `stale` aliases `disappeared` for one release. (D… spec)
+    result.stale = counts.disappeared;
+  };
+
+  const closeOk = (): void => {
+    db.closeScanRunOk(runId, {
+      filesWalked: result.scanned,
+      filesDisappeared: result.disappeared,
+      filesResurrected: result.resurrected,
+    });
   };
 
   // 1. Walk everything first.
@@ -394,6 +588,8 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
 
   if (allFilesWalked.length === 0) {
     progress?.emit({ type: 'diff', dirty: 0, disappeared: 0, total: 0 });
+    runReconcile([]);
+    closeOk();
     return result;
   }
 
@@ -491,10 +687,13 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
 
   if (allFiles.length === 0) {
     progress?.emit({ type: 'diff', dirty: 0, disappeared: 0, total: 0 });
-    const staleRow = db.raw
-      .prepare(`SELECT COUNT(*) AS c FROM media_items WHERE scanned_at < ?`)
-      .get(startedAt) as { c: number };
-    result.stale = staleRow.c;
+    // We've walked the disk and only manual-override files exist (no
+    // unidentified ones). Manual overrides land via applyIdentity, which
+    // upserts and clears deleted_at on the affected paths. Reconcile against
+    // the full walked set so any other DB rows whose paths disappeared get
+    // soft-deleted.
+    runReconcile(allFilesWalked);
+    closeOk();
     return result;
   }
 
@@ -514,14 +713,13 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
 
   // Smart-refresh no-change early return: nothing on disk has changed and
   // nothing has disappeared. Bump scanned_at on every existing on-disk row
-  // (so they don't fall under the stale gate) and exit. ZERO TMDB calls,
-  // ZERO probeFile calls.
+  // (so the prober's mtime gate stays accurate) and reconcile (a no-op
+  // beyond confirming no rows changed). ZERO TMDB calls, ZERO probeFile
+  // calls.
   if (!opts.full && newOrChanged.length === 0 && disappeared.length === 0) {
     bumpScannedAtForFiles(db, allFiles, startedAt);
-    const staleRow = db.raw
-      .prepare(`SELECT COUNT(*) AS c FROM media_items WHERE scanned_at < ?`)
-      .get(startedAt) as { c: number };
-    result.stale = staleRow.c;
+    runReconcile(allFilesWalked);
+    closeOk();
     return result;
   }
 
@@ -601,10 +799,12 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
   // 4. Pass B — multi-source rescue over needs_review entries (0.1.1.3).
   await runPassB(deps, source, db, log, t, startedAt, result, ratingFetcher, opts);
 
-  const staleRow = db.raw
-    .prepare(`SELECT COUNT(*) AS c FROM media_items WHERE scanned_at < ?`)
-    .get(startedAt) as { c: number };
-  result.stale = staleRow.c;
+  // 5. 0.1.10 — reconcile: paths in DB but not on disk get soft-deleted;
+  // paths on disk that were previously soft-deleted get resurrected; parent
+  // aliveness recomputed for series/movies. One transaction so the home
+  // view never observes a half-reconciled state.
+  runReconcile(allFilesWalked);
+  closeOk();
 
   return result;
 }
@@ -1093,7 +1293,8 @@ async function persistMovieCohort(
              runtime_seconds = COALESCE(?, runtime_seconds),
              imdb_rating = COALESCE(?, imdb_rating),
              imdb_votes  = COALESCE(?, imdb_votes),
-             scanned_at = ?
+             scanned_at = ?,
+             deleted_at = NULL
          WHERE id = ?`,
       )
       .run(
@@ -1224,7 +1425,8 @@ async function persistSeriesCohort(
              genres_json = COALESCE(?, genres_json),
              imdb_rating = COALESCE(?, imdb_rating),
              imdb_votes  = COALESCE(?, imdb_votes),
-             scanned_at = ?
+             scanned_at = ?,
+             deleted_at = NULL
          WHERE id = ?`,
       )
       .run(
@@ -1242,7 +1444,7 @@ async function persistSeriesCohort(
         startedAt,
         existingByTmdbId.id,
       );
-    seriesRow = { ...existingByTmdbId, scanned_at: startedAt };
+    seriesRow = { ...existingByTmdbId, scanned_at: startedAt, deleted_at: null };
   } else {
     seriesRow = db.upsertItem({
       path: seriesPath,

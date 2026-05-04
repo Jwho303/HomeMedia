@@ -22,6 +22,11 @@ export interface LibraryItem {
   imdbRating: number | null;
   /** IMDb vote count. Null when unknown. (0.1.8) */
   imdbVotes: number | null;
+  /** 0.1.10 — soft-delete tombstone (epoch ms). Null when alive. Search view
+   *  surfaces dimmed tiles for non-null and disables the play affordance.
+   *  Optional on the type so test fixtures from older specs stay valid;
+   *  the server always populates it (null = alive). */
+  deletedAt?: number | null;
 }
 
 export interface Library {
@@ -116,6 +121,12 @@ export interface ScanResult {
   inserted?: number;
   updated?: number;
   errors?: number;
+  /** 0.1.10 — paths that flipped from alive → soft-deleted on this run. */
+  disappeared?: number;
+  /** 0.1.10 — paths that flipped from soft-deleted → alive on this run. */
+  resurrected?: number;
+  /** 0.1.10 — the scan_runs row id for this run. */
+  runId?: number;
   [k: string]: unknown;
 }
 

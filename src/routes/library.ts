@@ -33,6 +33,10 @@ interface LibraryItemDto {
   // frontend renders a star pill in the top-left of the poster when present.
   imdbRating: number | null;
   imdbVotes: number | null;
+  /** 0.1.10 — soft-delete tombstone (epoch ms). Null when alive. Search view
+   *  uses this to render a dimmed "(not on disk)" tile and disable the play
+   *  affordance. Default lists never include rows where this is non-null. */
+  deletedAt: number | null;
 }
 
 function parseGenres(json: string | null): string[] {
@@ -74,6 +78,7 @@ function toDto(
     lastPlayedAt: pb.lastPlayedAt,
     imdbRating: row.imdb_rating,
     imdbVotes: row.imdb_votes,
+    deletedAt: row.deleted_at ?? null,
   };
 }
 

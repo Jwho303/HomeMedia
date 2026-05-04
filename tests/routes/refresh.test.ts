@@ -90,6 +90,9 @@ describe('refresh routes', () => {
         errors: 0,
         scanned: 0,
         needsReview: 0,
+        disappeared: 0,
+        resurrected: 0,
+        runId: 1,
       };
     });
 

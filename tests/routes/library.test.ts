@@ -21,7 +21,7 @@ describe('library routes', () => {
     setDb(openDb(':memory:'));
   });
 
-  it('GET /api/library returns split movies/series; excludes stale by default', async () => {
+  it('GET /api/library returns split movies/series; excludes soft-deleted by default', async () => {
     const { getDb } = await import('../../src/db.js');
     const db = getDb();
     db.upsertItem({
@@ -60,6 +60,9 @@ describe('library routes', () => {
       mtime: 1,
       scanned_at: 5000,
     });
+    // 0.1.10 — staleness is `deleted_at IS NOT NULL`, not the legacy
+    // `scanned_at < MAX(scanned_at)` predicate.
+    db.raw.prepare(`UPDATE media_items SET deleted_at = 2000 WHERE path = 'Old.mkv'`).run();
 
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();
@@ -67,7 +70,6 @@ describe('library routes', () => {
       const res = await app.inject({ method: 'GET', url: '/api/library' });
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      // Old (scanned_at=1000) is stale relative to MAX(scanned_at)=5000.
       expect(body.movies.map((m: { title: string }) => m.title)).toEqual(['Fresh']);
       expect(body.series.map((s: { title: string }) => s.title)).toEqual(['The Bear']);
 

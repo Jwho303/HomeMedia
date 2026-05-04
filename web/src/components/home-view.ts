@@ -147,8 +147,13 @@ export class HomeView extends LitElement {
     this.error = null;
     this.now = Date.now();
     try {
+      // 0.1.10 — home view shows alive rows only. Soft-deleted rows are
+      // surfaced exclusively in the search view (which still passes
+      // includeStale=true). Including them on the home grid was the
+      // visible bug from the post-0.1.10 hard refresh: the user saw rows
+      // they had already deleted from disk, and clicking them 404'd.
       const [lib, cont] = await Promise.all([
-        apiLibrary({ includeStale: true }),
+        apiLibrary(),
         apiContinue().catch(() => [] as ContinueRow[]),
       ]);
       this.library = lib;
@@ -309,7 +314,7 @@ export class HomeView extends LitElement {
     try {
       await apiItemSetWatched(e.detail.item.id, e.detail.watched);
       const [lib, cont] = await Promise.all([
-        apiLibrary({ includeStale: true }),
+        apiLibrary(),
         apiContinue().catch(() => [] as ContinueRow[]),
       ]);
       this.library = lib;
@@ -337,9 +342,14 @@ function formatScanSummary(r: Record<string, unknown>): string | null {
   const probed = num('probed');
   const errors = num('errors');
   const scanned = num('scanned');
+  // 0.1.10 — soft-delete reconcile counters.
+  const disappeared = num('disappeared');
+  const resurrected = num('resurrected');
   const parts: string[] = [];
   if (added > 0) parts.push(`${added} added`);
   if (updated > 0) parts.push(`${updated} updated`);
+  if (resurrected > 0) parts.push(`+${resurrected} restored`);
+  if (disappeared > 0) parts.push(`−${disappeared} hidden`);
   if (needsReview > 0) parts.push(`${needsReview} need review`);
   if (probed > 0) parts.push(`${probed} probed`);
   if (errors > 0) parts.push(`${errors} error${errors === 1 ? '' : 's'}`);

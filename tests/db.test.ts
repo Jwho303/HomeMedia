@@ -133,7 +133,7 @@ describe('db', () => {
     expect(db.getEpisodeByPath('The Bear/S01E01.mkv')).toBeUndefined();
   });
 
-  it('listLibrary excludes stale by default; includeStale returns everything', () => {
+  it('listLibrary excludes soft-deleted by default; includeStale returns everything', () => {
     db.upsertItem({
       path: 'old.mkv',
       type: 'movie',
@@ -158,6 +158,8 @@ describe('db', () => {
       mtime: 1,
       scanned_at: 200,
     });
+    // 0.1.10 — staleness is `deleted_at IS NOT NULL`, not `scanned_at < MAX`.
+    db.raw.prepare(`UPDATE media_items SET deleted_at = 150 WHERE path = 'old.mkv'`).run();
 
     const fresh = db.listLibrary();
     expect(fresh.map((r) => r.path)).toEqual(['new.mkv']);
@@ -166,8 +168,8 @@ describe('db', () => {
     expect(all.map((r) => r.path).sort()).toEqual(['new.mkv', 'old.mkv']);
   });
 
-  it('latestScannedAt returns 0 for an empty DB', () => {
-    expect(db.latestScannedAt()).toBe(0);
+  it('latestRunAt returns 0 for an empty DB', () => {
+    expect(db.latestRunAt()).toBe(0);
   });
 
   it('media_items has confidence + identification_json columns', () => {

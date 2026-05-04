@@ -136,7 +136,7 @@ describe('smart refresh diff-and-gate', () => {
     expect(r2.added).toBeGreaterThanOrEqual(1);
   });
 
-  it('a deleted file → row left alone (scanned_at unchanged)', async () => {
+  it('a deleted file → deleted_at is set on the row (0.1.10)', async () => {
     const root = await makeFixture({
       'Dune.2021.mkv': 'd',
       'Inception.2010.mkv': 'i',
@@ -144,19 +144,22 @@ describe('smart refresh diff-and-gate', () => {
     const t = makeTmdb();
     await scan({}, { db, mediaRoot: root, tmdb: t, share: onlineShare });
     const before = db.raw
-      .prepare(`SELECT scanned_at FROM media_items WHERE path = 'Inception.2010.mkv'`)
-      .get() as { scanned_at: number };
+      .prepare(`SELECT deleted_at FROM media_items WHERE path = 'Inception.2010.mkv'`)
+      .get() as { deleted_at: number | null };
+    expect(before.deleted_at).toBeNull();
     await fs.rm(path.join(root, 'Inception.2010.mkv'));
     await new Promise((r) => setTimeout(r, 5));
     const r2 = await scan({}, { db, mediaRoot: root, tmdb: t, share: onlineShare });
     const after = db.raw
-      .prepare(`SELECT scanned_at FROM media_items WHERE path = 'Inception.2010.mkv'`)
-      .get() as { scanned_at: number };
-    expect(after.scanned_at).toBe(before.scanned_at);
-    expect(r2.stale).toBeGreaterThanOrEqual(1);
+      .prepare(`SELECT deleted_at FROM media_items WHERE path = 'Inception.2010.mkv'`)
+      .get() as { deleted_at: number | null };
+    expect(after.deleted_at).not.toBeNull();
+    expect(r2.disappeared).toBeGreaterThanOrEqual(1);
+    // `stale` aliases `disappeared` for one release of back-compat.
+    expect(r2.stale).toBe(r2.disappeared);
   });
 
-  it('renamed file: old path becomes stale, new path is identified', async () => {
+  it('renamed file: old path soft-deleted, new path is identified (0.1.10)', async () => {
     // Use two distinct movies so a rename actually disappears one identity
     // and adds another. (Renaming Dune → Dune Renamed would still resolve to
     // the same tmdb_id and the row would just update.)
@@ -165,20 +168,17 @@ describe('smart refresh diff-and-gate', () => {
     });
     const t = makeTmdb();
     await scan({}, { db, mediaRoot: root, tmdb: t, share: onlineShare });
-    const before = db.raw
-      .prepare(`SELECT scanned_at FROM media_files WHERE path = 'Inception.2010.mkv'`)
-      .get() as { scanned_at: number };
     await fs.rename(
       path.join(root, 'Inception.2010.mkv'),
       path.join(root, 'Dune.2021.mkv'),
     );
     await new Promise((r) => setTimeout(r, 5));
     const r2 = await scan({}, { db, mediaRoot: root, tmdb: t, share: onlineShare });
-    // Old media_files row is left alone — disappeared paths are not touched.
+    // Old media_files row is soft-deleted, not removed.
     const oldAfter = db.raw
-      .prepare(`SELECT scanned_at FROM media_files WHERE path = 'Inception.2010.mkv'`)
-      .get() as { scanned_at: number };
-    expect(oldAfter.scanned_at).toBe(before.scanned_at);
+      .prepare(`SELECT deleted_at FROM media_files WHERE path = 'Inception.2010.mkv'`)
+      .get() as { deleted_at: number | null };
+    expect(oldAfter.deleted_at).not.toBeNull();
     // New file got identified.
     expect(r2.added + r2.updated).toBeGreaterThanOrEqual(1);
   });
