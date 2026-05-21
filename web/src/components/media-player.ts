@@ -28,6 +28,7 @@ import type {
   SeriesDetail,
 } from '../types.js';
 import { goBack, homeHref, navigate, playHref, seriesHref } from '../router.js';
+import { getConnectionState } from '../connection-store.js';
 import {
   cacheLibrary,
   cacheSeriesDetail,
@@ -784,18 +785,50 @@ export class MediaPlayer extends LitElement {
       background: rgba(255,255,255,0.08);
       margin: 6px 4px;
     }
-    .error {
+    /* 0.1.11 — friendly "Technical difficulties" panel for playback errors
+     *  (HLS load failure, /open 5xx, heartbeat revive failed). Full-bleed
+     *  illustration with a single retry button overlapping the lower-center. */
+    .error-panel {
       position: absolute;
       inset: 0;
-      padding: 24px;
-      background: var(--surface);
-      border: 1px solid var(--error);
-      color: var(--error);
-      border-radius: var(--radius-lg);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
+      background: var(--bg) center / cover no-repeat;
+      overflow: hidden;
+    }
+    .error-panel .error-art {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .error-panel .error-retry {
+      position: absolute;
+      left: 50%;
+      bottom: 8%;
+      transform: translateX(-50%);
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      border-radius: 999px;
+      padding: 12px 32px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    }
+    .error-panel .error-retry:hover { filter: brightness(1.1); }
+    .error-panel .error-retry:focus-visible {
+      outline: none;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), var(--shadow-accent);
+    }
+    /* Top-left back button overlay, matches the in-player .back-btn so the
+     *  panel still feels like part of the player surface. */
+    .error-panel .error-back {
+      position: absolute;
+      top: 16px;
+      left: 16px;
     }
     .external-panel {
       position: absolute;
@@ -1029,10 +1062,35 @@ export class MediaPlayer extends LitElement {
     window.addEventListener('pagehide', this.onPageHide);
     window.addEventListener('keydown', this.onKeyDown);
     document.addEventListener('click', this.onDocClick);
+    // 0.1.11 — retry bootstrap after the server returns. The connection store
+    // fires `library-invalidated` on unreachable→reachable transitions, which
+    // is exactly when this should re-attempt.
+    document.addEventListener('library-invalidated', this.libraryInvalidatedListener);
     // Start the idle timer once we're attached so chrome auto-hides even if no
     // mouse moves happen.
     this.kickIdleTimer();
   }
+
+  /** 0.1.11 — recovery handler. Fired by the connection-store on
+   *  `unreachable → reachable`. Covers three cases:
+   *  1. Bootstrap never ran because we were unreachable on mount → the guard
+   *     in runPlayerSessionBootstrap returned early; clear `probedFor` and
+   *     run it now.
+   *  2. Bootstrap succeeded earlier but the server restarted mid-playback,
+   *     the heartbeat revive failed, and we landed in error state. The
+   *     stale playerId is dead; mint a fresh one via retryPlayback().
+   *  3. Bootstrap is in progress / finished and the player is healthy. No-op. */
+  private libraryInvalidatedListener = (): void => {
+    if (this.error != null) {
+      this.retryPlayback();
+      return;
+    }
+    if (this.playerBundle == null && this.probedFor === this.relPath) {
+      // Bootstrap was skipped by the unreachable guard; re-arm it.
+      this.probedFor = null;
+      void this.runPlayerSessionBootstrap();
+    }
+  };
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -1046,6 +1104,7 @@ export class MediaPlayer extends LitElement {
     window.removeEventListener('pagehide', this.onPageHide);
     window.removeEventListener('keydown', this.onKeyDown);
     document.removeEventListener('click', this.onDocClick);
+    document.removeEventListener('library-invalidated', this.libraryInvalidatedListener);
     if (this.clickTimer !== null) {
       clearTimeout(this.clickTimer);
       this.clickTimer = null;
@@ -1263,6 +1322,10 @@ export class MediaPlayer extends LitElement {
    *  element, then attach hls.js to it. */
   private async runPlayerSessionBootstrap(): Promise<void> {
     if (this.probedFor === this.relPath) return;
+    // 0.1.11 — skip the open call while server is unreachable. The
+    // `library-invalidated` listener will re-call us once the server is back.
+    // We leave `probedFor` null so this method doesn't permanently guard out.
+    if (getConnectionState()?.kind === 'unreachable') return;
     this.probedFor = this.relPath;
     this.probing = true;
 
@@ -2126,7 +2189,7 @@ export class MediaPlayer extends LitElement {
       return this.renderCapacityPanel();
     }
     if (this.error) {
-      return html`<div class="error">${this.error}</div>`;
+      return this.renderErrorPanel();
     }
     if (this.probing || !this.probe) {
       return html`<div class="loading-panel">Checking playback…</div>`;
@@ -2948,6 +3011,42 @@ export class MediaPlayer extends LitElement {
   /** 0.1.9 — "Encoder busy" panel rendered when /open returns 503
    *  capacity_exceeded. The user has to close another player to free a
    *  slot. Retry just calls /open again. */
+  /** 0.1.11 — friendly playback-error panel. Surfaces when the HLS load
+   *  failed, the heartbeat revive gave up after a server restart, or the
+   *  `/open` call errored. Offers a Retry that re-runs the session
+   *  bootstrap with a fresh playerId. */
+  private renderErrorPanel(): unknown {
+    return html`
+      <div class="error-panel">
+        <img class="error-art" src="/404.jpg" alt="Technical difficulties" />
+        <button
+          class="back-btn error-back"
+          title="Back"
+          @click=${(): void => this.onBackClick()}
+        >${iconBackChevron()}</button>
+        <button class="error-retry" @click=${(): void => this.retryPlayback()}>
+          Retry
+        </button>
+      </div>
+    `;
+  }
+
+  /** 0.1.11 — clear the error and re-run the session bootstrap. Used by
+   *  the manual Retry button AND by the automatic recovery path when the
+   *  connection-store fires `library-invalidated` after the server is back. */
+  private retryPlayback(): void {
+    this.error = null;
+    // Tear down the stale PlayerSession (if any) — the server forgot our
+    // playerId, so the next /open call mints a fresh one.
+    if (this.playerSessionCtl) {
+      void this.playerSessionCtl.close(false).catch(() => undefined);
+      this.playerSessionCtl = null;
+    }
+    this.playerBundle = null;
+    this.probedFor = null;
+    void this.runPlayerSessionBootstrap();
+  }
+
   private renderCapacityPanel(): unknown {
     const c = this.capacityError;
     if (!c) return null;

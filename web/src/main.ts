@@ -8,6 +8,7 @@ installConsoleBuffer();
 // Importing the components registers their custom elements as a side effect.
 import './components/app-shell.js';
 import './components/share-banner.js';
+import './components/reconnect-overlay.js';
 import './components/home-view.js';
 import './components/home-header.js';
 import './components/poster-strip.js';

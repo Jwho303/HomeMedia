@@ -19,6 +19,7 @@ import {
   SHARE_STATUS_EVENT,
   getLastKnownShareStatus,
 } from './share-banner.js';
+import { getConnectionState } from '../connection-store.js';
 import './home-header.js';
 import './poster-strip.js';
 import type { LibraryToggle } from './home-header.js';
@@ -143,6 +144,10 @@ export class HomeView extends LitElement {
   }
 
   private async load(): Promise<void> {
+    // 0.1.11 — when the server is unreachable, skip the fetch. <reconnect-overlay>
+    // owns the user-facing state; on recovery the store fires `library-invalidated`
+    // (which we listen for above) so this method runs again with a live server.
+    if (getConnectionState()?.kind === 'unreachable') return;
     this.loading = true;
     this.error = null;
     this.now = Date.now();
@@ -171,6 +176,7 @@ export class HomeView extends LitElement {
   }
 
   private async loadContinue(): Promise<void> {
+    if (getConnectionState()?.kind === 'unreachable') return;
     try {
       this.continueRows = await apiContinue();
     } catch {

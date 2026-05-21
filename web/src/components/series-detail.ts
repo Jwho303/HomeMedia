@@ -16,6 +16,7 @@ import {
   subscribeScanProgress,
   type ScanProgressState,
 } from '../scan-progress-store.js';
+import { getConnectionState } from '../connection-store.js';
 
 @customElement('series-detail')
 export class SeriesDetailView extends LitElement {
@@ -194,6 +195,8 @@ export class SeriesDetailView extends LitElement {
 
   private async load(): Promise<void> {
     if (!this.seriesId) return;
+    // 0.1.11 — skip while server is unreachable; reload after recovery.
+    if (getConnectionState()?.kind === 'unreachable') return;
     this.loading = true;
     this.error = null;
     try {

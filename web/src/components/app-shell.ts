@@ -14,6 +14,7 @@ import {
 } from '../scan-progress-store.js';
 import type { ScanProgressEvent } from '../types.js';
 import './share-banner.js';
+import './reconnect-overlay.js';
 import './home-view.js';
 import './series-detail.js';
 import './media-player.js';
@@ -187,6 +188,7 @@ export class AppShell extends LitElement {
         @applied=${(): void => this.onManualIdentifyApplied()}
         @cancelled=${(): void => this.onManualIdentifyCancelled()}
       ></manual-identify-modal>
+      <reconnect-overlay></reconnect-overlay>
     `;
   }
 

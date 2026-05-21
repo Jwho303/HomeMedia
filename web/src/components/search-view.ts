@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { apiLibrary, ShareOfflineError } from '../api.js';
+import { getConnectionState } from '../connection-store.js';
 import { goBack, homeHref, navigate, playHref, seriesHref } from '../router.js';
 import type { Library, LibraryItem } from '../types.js';
 import { formatImdbRating } from './poster-strip.js';
@@ -204,10 +205,17 @@ export class SearchView extends LitElement {
     if (q !== this.query) this.query = q;
   };
 
+  /** 0.1.11 — refetch after connection recovery (and for the 0.1.5.2 manual-
+   *  identify flow). */
+  private libraryInvalidatedListener = (): void => {
+    void this.load();
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.query = SearchView.readQueryFromHash();
     window.addEventListener('hashchange', this.hashListener);
+    document.addEventListener('library-invalidated', this.libraryInvalidatedListener);
     void this.load();
     requestAnimationFrame(() => this.focusInput());
   }
@@ -215,6 +223,7 @@ export class SearchView extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('hashchange', this.hashListener);
+    document.removeEventListener('library-invalidated', this.libraryInvalidatedListener);
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
   }
 
@@ -233,6 +242,7 @@ export class SearchView extends LitElement {
   }
 
   private async load(): Promise<void> {
+    if (getConnectionState()?.kind === 'unreachable') return;
     this.loading = true;
     this.error = null;
     try {
