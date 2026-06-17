@@ -16,4 +16,5 @@ import './components/season-strip.js';
 import './components/watched-button.js';
 import './components/series-detail.js';
 import './components/media-player.js';
+import './components/settings-view.js';
 import './components/tile.js';

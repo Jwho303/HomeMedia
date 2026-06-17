@@ -63,6 +63,15 @@ const SCALE_CUDA_TO_YUV420P: ReadonlyArray<string> = ['-vf', 'scale_cuda=format=
 const SW_PIX_FMT_YUV420P: ReadonlyArray<string> = ['-pix_fmt', 'yuv420p'];
 
 const NVENC_HWACCEL_INPUT: ReadonlyArray<string> = [
+  // 0.1.11 — cap decode threads on the CUDA hwaccel path. ffmpeg's default
+  // thread count (= CPU count, 16 here) makes the h264 NVDEC decoder request
+  // `threads + 20` decode surfaces (36), which exceeds NVDEC's 32-surface
+  // ceiling: `cuvidCreateDecoder` fails with CUDA_ERROR_INVALID_VALUE and,
+  // because `-hwaccel_output_format cuda` pins GPU output, there's no
+  // software fallback — the session writes zero segments and /open times out
+  // (→ 415 hls_unavailable). 4 keeps the surface count well under 32 while
+  // preserving decode parallelism. Must precede `-i`.
+  '-threads', '4',
   '-hwaccel', 'cuda',
   '-hwaccel_output_format', 'cuda',
 ];

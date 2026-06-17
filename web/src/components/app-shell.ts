@@ -6,6 +6,7 @@ import {
   apiReprobeEpisode,
   apiReprobeItem,
   apiReprobeLibrary,
+  apiSetupState,
 } from '../api.js';
 import {
   applyScanEvent,
@@ -19,6 +20,9 @@ import './home-view.js';
 import './series-detail.js';
 import './media-player.js';
 import './search-view.js';
+import './settings-view.js';
+import './ftue-wizard.js';
+import { FTUE_COMPLETE_EVENT } from './ftue-wizard.js';
 import './manual-identify-modal.js';
 import type { ManualIdentifyTarget } from './manual-identify-modal.js';
 
@@ -52,6 +56,11 @@ export class AppShell extends LitElement {
 
   @state() private route: Route = currentRoute();
   @state() private manualIdentifyTarget: ManualIdentifyTarget | null = null;
+  /** 0.1.13 — first-run gate. `checking` while we poll `/api/setup-state`;
+   *  `wizard` when the install isn't set up (or has no library yet) so we show
+   *  the FTUE takeover; `ready` for the normal app. Until `ready`, normal
+   *  routing is never rendered, so the user can't stumble into a guarded view. */
+  @state() private gate: 'checking' | 'wizard' | 'ready' = 'checking';
   private unsub: (() => void) | null = null;
   private eventSource: EventSource | null = null;
   /** Resolves to the final ScanResult for the in-flight job, when callers care. */
@@ -61,6 +70,9 @@ export class AppShell extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.unsub = onRouteChange((r) => { this.route = r; });
+    // 0.1.13 — decide whether to show the FTUE wizard before rendering routes.
+    document.addEventListener(FTUE_COMPLETE_EVENT, this.onFtueComplete);
+    void this.checkSetup();
     this.addEventListener('refresh-trigger', this.onRefreshTrigger as EventListener);
     this.addEventListener('reprobe-library-trigger', this.onReprobeLibraryTrigger as EventListener);
     this.addEventListener('reprobe-item-trigger', this.onReprobeItemTrigger as EventListener);
@@ -72,6 +84,7 @@ export class AppShell extends LitElement {
     super.disconnectedCallback();
     this.unsub?.();
     this.unsub = null;
+    document.removeEventListener(FTUE_COMPLETE_EVENT, this.onFtueComplete);
     this.removeEventListener('refresh-trigger', this.onRefreshTrigger as EventListener);
     this.removeEventListener('reprobe-library-trigger', this.onReprobeLibraryTrigger as EventListener);
     this.removeEventListener('reprobe-item-trigger', this.onReprobeItemTrigger as EventListener);
@@ -79,6 +92,24 @@ export class AppShell extends LitElement {
     this.removeEventListener('manual-identify-request', this.onManualIdentifyRequest as EventListener);
     this.closeEventSource();
   }
+
+  /** 0.1.13 — gate normal routing on setup completeness. A fresh / unbuilt
+   *  install shows the wizard; a healthy install boots straight to the app.
+   *  On any error reaching `/api/setup-state` we fail open to the wizard — a
+   *  reachable-but-unconfigured server is exactly the FTUE case, and the
+   *  wizard re-polls on mount so a transient blip self-corrects. */
+  private async checkSetup(): Promise<void> {
+    try {
+      const s = await apiSetupState();
+      this.gate = s.configured && s.libraryBuilt ? 'ready' : 'wizard';
+    } catch {
+      this.gate = 'wizard';
+    }
+  }
+
+  private onFtueComplete = (): void => {
+    this.gate = 'ready';
+  };
 
   private onRefreshTrigger = (e: CustomEvent<RefreshTrigger>): void => {
     void this.runJob(() => apiRefresh(e.detail.full));
@@ -179,6 +210,11 @@ export class AppShell extends LitElement {
   }
 
   override render(): unknown {
+    // 0.1.13 — first-run gate. Hold rendering until we know the setup state, so
+    // the normal app never flashes for a fresh installer; show the wizard until
+    // it signals complete.
+    if (this.gate === 'checking') return html`<main></main>`;
+    if (this.gate === 'wizard') return html`<ftue-wizard></ftue-wizard>`;
     return html`
       <share-banner></share-banner>
       <main>${this.renderRoute()}</main>
@@ -202,6 +238,8 @@ export class AppShell extends LitElement {
         return html`<media-player .relPath=${this.route.path}></media-player>`;
       case 'search':
         return html`<search-view></search-view>`;
+      case 'settings':
+        return html`<settings-view></settings-view>`;
       case 'unknown':
       default:
         return html`<div style="padding:24px">Unknown route: ${this.route.name === 'unknown' ? this.route.hash : ''}</div>`;

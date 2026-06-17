@@ -3,6 +3,7 @@ export type Route =
   | { name: 'series'; id: number }
   | { name: 'play'; path: string }
   | { name: 'search' }
+  | { name: 'settings' }
   | { name: 'unknown'; hash: string };
 
 export function currentRoute(): Route {
@@ -16,6 +17,7 @@ export function parseHash(hash: string): Route {
   // <search-view> reads the query from location.hash itself.
   const [pathOnly] = h.split('?');
   if (pathOnly === '/search') return { name: 'search' };
+  if (pathOnly === '/settings') return { name: 'settings' };
 
   const seriesMatch = (pathOnly ?? '').match(/^\/series\/(\d+)$/);
   if (seriesMatch && seriesMatch[1]) {
@@ -78,6 +80,7 @@ export function goBack(fallback: string): void {
 }
 
 export function homeHref(): string { return '#/'; }
+export function settingsHref(): string { return '#/settings'; }
 export function seriesHref(id: number): string { return `#/series/${id}`; }
 export function playHref(relPath: string): string {
   return `#/play/${encodeURIComponent(relPath)}`;

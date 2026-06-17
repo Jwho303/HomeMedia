@@ -36,3 +36,4 @@ Thumbs.db
 
 # Archives / one-off assets
 *.zip
+.claude/settings.json

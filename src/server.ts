@@ -7,6 +7,8 @@ import { makeConsolePrettyStream, ConsolePrettyStream } from './log/console-pret
 import { StatusBlock } from './log/status-block.js';
 import { registerShareRoutes } from './routes/share.js';
 import { registerConfigRoutes } from './routes/config.js';
+import { registerSettingsRoutes } from './routes/settings.js';
+import { registerSetupRoutes } from './routes/setup.js';
 import { registerLibraryRoutes } from './routes/library.js';
 import { registerPlaybackRoutes } from './routes/playback.js';
 import { registerRefreshRoutes } from './routes/refresh.js';
@@ -19,6 +21,7 @@ import { registerSubsRoutes } from './routes/subs.js';
 import { registerEmbeddedSubsRoutes } from './routes/embedded-subs.js';
 import { registerManualIdentifyRoutes } from './routes/manual-identify.js';
 import { shareGuard } from './middleware/share-guard.js';
+import { requireConfigured } from './middleware/require-configured.js';
 import { getHlsSessionManager } from './streaming/hls-session.js';
 import { getPlayerInstanceManager, setPlayerInstanceManagerForTests, PlayerInstanceManager } from './player/instance.js';
 import { detectEncoders } from './encoders.js';
@@ -76,16 +79,27 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
 
   await app.register(registerShareRoutes);
   await app.register(registerConfigRoutes);
-  await app.register(registerLibraryRoutes);
-  await app.register(registerPlaybackRoutes);
-  // Manual-identify routes scope their own share-guard / scan-lock per route.
-  await app.register(registerManualIdentifyRoutes);
+  // 0.1.12 / 0.1.13 — settings + setup-state admin surface. Registered outside
+  // every guard: a fresh clone with no keys must reach these so the FTUE wizard
+  // can detect "needs setup" and collect the TMDB key + media folder.
+  await app.register(registerSettingsRoutes);
+  await app.register(registerSetupRoutes);
+  // 0.1.13 — library + playback touch the media library, so they boot closed
+  // behind `requireConfigured` (503 `not_configured`) until setup completes.
+  // Manual-identify scopes its own share-guard / scan-lock per route but also
+  // needs a configured install, so it shares this guard.
+  await app.register(async (s) => {
+    s.addHook('onRequest', requireConfigured);
+    await registerLibraryRoutes(s);
+    await registerPlaybackRoutes(s);
+    await registerManualIdentifyRoutes(s);
+  });
   // Client-log accepts diagnostic reports from the player UI. Registered
-  // outside the share-guard scope on purpose: reports about playback failures
-  // are most valuable precisely when the share is offline.
+  // outside every guard on purpose: reports about playback failures are most
+  // valuable precisely when the share is offline / not yet configured.
   await app.register(registerClientLogRoutes);
   // Admin routes — currently just `/api/admin/log-tail`. The route enforces
-  // loopback-only access internally; no shareGuard needed.
+  // loopback-only access internally; no guard needed.
   await app.register(registerAdminRoutes);
 
   // 0.1.9 — make sure the player manager singleton exists before any
@@ -99,6 +113,10 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
   }
 
   await app.register(async (s) => {
+    // 0.1.13 — scan / playback streaming need a configured install first, then
+    // (per 0.1.x) an online share. `requireConfigured` short-circuits with
+    // 503 `not_configured` before the share check when setup is incomplete.
+    s.addHook('onRequest', requireConfigured);
     s.addHook('onRequest', shareGuard);
     await registerRefreshRoutes(s);
     await registerReprobeRoutes(s);

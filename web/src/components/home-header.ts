@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { SortMode } from './home-chunks.js';
 import type { ScanPhase } from '../scan-progress-store.js';
+import { navigate } from '../router.js';
 
 export type LibraryToggle = 'movies' | 'series';
 
@@ -375,6 +376,9 @@ export class HomeHeader extends LitElement {
                     ?disabled=${this.jobActive || !this.online}
                     @click=${(): void => this.emitReprobeLibrary()}
                   >Re-probe library</button>
+                  <button
+                    @click=${(): void => { this.gearOpen = false; navigate('#/settings'); }}
+                  >Settings</button>
                 </div>`
               : null}
           </div>

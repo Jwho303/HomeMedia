@@ -245,6 +245,118 @@ export async function apiConfig(): Promise<ApiConfig> {
   return cachedApiConfig;
 }
 
+/** 0.1.12 — Settings screen. The server never returns raw key values: secret
+ *  fields carry only a masked hint; MEDIA_ROOT carries its editable value. */
+export type SettingsField = 'TMDB_API_KEY' | 'OMDB_API_KEY' | 'TVDB_API_KEY' | 'MEDIA_ROOT';
+
+export interface SettingsFieldState {
+  set: boolean;
+  required: boolean;
+  signupUrl: string | null;
+  masked?: string | null;
+  value?: string;
+}
+
+export type SettingsState = Record<SettingsField, SettingsFieldState>;
+
+export const apiSettingsGet = (): Promise<SettingsState> =>
+  api<SettingsState>('/api/settings');
+
+/** 0.1.13 — FTUE. Polled on boot to decide whether to show the setup wizard.
+ *  Never throws on missing config and never leaks a raw key value. */
+export interface SetupState {
+  configured: boolean;
+  tmdbReady: boolean;
+  mediaFolders: string[];
+  libraryBuilt: boolean;
+  itemCount: number;
+  activeJobId: string | null;
+}
+
+export const apiSetupState = (): Promise<SetupState> =>
+  api<SetupState>('/api/setup-state');
+
+export interface SettingsTestResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** Test a key. Pass `value` to verify a typed candidate before saving; omit it
+ *  (or pass '') to verify the key already saved on the server — used to confirm
+ *  a stored secret still works without re-pasting it. */
+export async function apiSettingsTest(
+  field: SettingsField,
+  value?: string,
+): Promise<SettingsTestResult> {
+  const r = await fetch('/api/settings/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ field, value: value ?? '' }),
+  });
+  // The test endpoint reports failures in-band as { ok:false }, including for
+  // 400s (unknown field). Parse the body regardless of status.
+  const body = (await r.json().catch(() => null)) as SettingsTestResult | null;
+  if (body && typeof body.ok === 'boolean') return body;
+  return { ok: false, error: `${r.status} ${r.statusText}` };
+}
+
+export interface SettingsSaveError {
+  error: string;
+  issues?: string[];
+}
+
+/** Persist the editable fields. Resolves to the new (masked) state on success;
+ *  throws an Error whose message lists the validation issues on 400. */
+export async function apiSettingsSave(
+  fields: Partial<Record<SettingsField, string>>,
+): Promise<SettingsState> {
+  const r = await fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (r.status === 400) {
+    const body = (await r.json().catch(() => null)) as SettingsSaveError | null;
+    throw new Error(body?.issues?.join('; ') ?? 'Invalid settings');
+  }
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as SettingsState;
+}
+
+/** 0.1.12 — server access info: current port + URLs remote devices can use.
+ *  `host` is the hostname the current browser dialed (to highlight it). */
+export interface SettingsAccess {
+  port: number;
+  host: string | null;
+  urls: string[];
+}
+
+export const apiSettingsAccess = (): Promise<SettingsAccess> =>
+  api<SettingsAccess>('/api/settings/access');
+
+/** 0.1.12 — change the listen port (takes effect on next restart). */
+export async function apiSettingsPort(port: number): Promise<{ port: number; restartRequired: boolean }> {
+  const r = await fetch('/api/settings/port', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ port }),
+  });
+  if (r.status === 400) throw new Error('Invalid port (must be 1–65535)');
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as { port: number; restartRequired: boolean };
+}
+
+/** 0.1.12 — ask the server to exit so its supervisor relaunches it. Best
+ *  effort: the connection drops as the process exits, so a thrown/aborted
+ *  fetch is expected and not an error. */
+export async function apiSettingsRestart(): Promise<void> {
+  try {
+    await fetch('/api/settings/restart', { method: 'POST' });
+  } catch {
+    /* connection drops as the process exits — expected */
+  }
+}
+
 export const subsUrl = (relPath: string): string =>
   `/api/subs/${encodeURIComponent(relPath)}`;
 
