@@ -117,8 +117,6 @@ The Vite dev server (`:5173`) proxies `/api` to `http://127.0.0.1:3000`, so
   - [`src/cli/`](src/cli/) — `scan` and `review` CLIs.
 - [`web/`](web/) — Lit frontend, built with Vite.
 - [`schema.sql`](schema.sql) — SQLite schema (idempotent; applied on open).
-- [`docs/specs/`](docs/specs/) — phased implementation specs (0.1.1 → 0.1.13),
-  the running design log for the project.
 - [`DEPLOY.md`](DEPLOY.md) — operational runbook: HLS cache, log tags, quiet
   console, reconnect overlay.
 - [`Brief.md`](Brief.md) — the original design brief and rationale.
@@ -163,6 +161,4 @@ server, browser playback.
 
 ## License
 
-No license is currently specified. Until one is added, this is "all rights
-reserved" by default — feel free to read and learn from it, and open an issue
-if you'd like a permissive license added.
+MIT — see [`LICENSE`](LICENSE).
