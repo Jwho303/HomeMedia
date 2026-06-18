@@ -36,6 +36,8 @@ import {
   ConfigError,
   config,
 } from '../config.js';
+import { getDb } from '../db.js';
+import { tryAcquire } from '../scan-lock.js';
 
 const SIGNUP_LINKS: Record<SettingsField, string | null> = {
   TMDB_API_KEY: 'https://www.themoviedb.org/settings/api',
@@ -341,5 +343,28 @@ export async function registerSettingsRoutes(app: FastifyInstance): Promise<void
       // eslint-disable-next-line no-process-exit
       process.exit(0);
     }, 250);
+  });
+
+  // Wipe the database. `scope: 'library'` clears scanned/identified/probed data
+  // (the next refresh rebuilds it) but keeps the user's manual title fixes and
+  // watch history. `scope: 'all'` clears everything for a brand-new DB. Holds
+  // the shared scan-lock so it can't run mid-scan; 409 if a scan is in progress.
+  app.post('/api/settings/wipe-db', async (req, reply) => {
+    const body = (req.body ?? {}) as { scope?: unknown };
+    const scope = body.scope === 'all' ? 'all' : body.scope === 'library' ? 'library' : null;
+    if (scope == null) {
+      return reply.code(400).send({ error: 'invalid_scope' });
+    }
+    const release = tryAcquire();
+    if (!release) {
+      return reply.code(409).send({ error: 'scan_in_progress' });
+    }
+    try {
+      const counts = getDb().wipe(scope);
+      const cleared = Object.values(counts).reduce((a, b) => a + b, 0);
+      return { ok: true, scope, cleared, counts };
+    } finally {
+      release();
+    }
   });
 }

@@ -8,6 +8,7 @@ import {
   apiSettingsAccess,
   apiSettingsPort,
   apiSettingsRestart,
+  apiSettingsWipeDb,
   type SettingsField,
   type SettingsState,
   type SettingsFieldState,
@@ -347,6 +348,9 @@ export class SettingsView extends LitElement {
   @state() private savingPort = false;
   @state() private copiedUrl: string | null = null;
   @state() private restarting = false;
+  // Reset-data section.
+  @state() private wiping: 'library' | 'all' | null = null;
+  @state() private wipeMsg: { kind: 'ok' | 'fail'; text: string } | null = null;
   private readonly pickerAvailable = folderPickerAvailable();
 
   override connectedCallback(): void {
@@ -499,6 +503,33 @@ export class SettingsView extends LitElement {
     await apiSettingsRestart();
     // The process is exiting; the reconnect overlay (0.1.11) takes over when
     // the server stops responding. Leave the button in its "restarting" state.
+  }
+
+  private async onWipeDb(scope: 'library' | 'all'): Promise<void> {
+    const prompt =
+      scope === 'all'
+        ? 'Delete EVERYTHING? This clears your whole library AND your manual ' +
+          'title fixes and watch history. This cannot be undone.'
+        : 'Rebuild the library? This clears the scanned library so the next ' +
+          'refresh re-identifies and re-probes every file. Your manual title ' +
+          'fixes and watch history are kept.';
+    if (!window.confirm(prompt)) return;
+    this.wiping = scope;
+    this.wipeMsg = null;
+    try {
+      const res = await apiSettingsWipeDb(scope);
+      this.wipeMsg = {
+        kind: 'ok',
+        text:
+          scope === 'all'
+            ? `Done — ${res.cleared} record(s) cleared. Run a refresh to rebuild your library.`
+            : `Done — library cleared (${res.cleared} record(s)). Run a refresh to rebuild it.`,
+      };
+    } catch (err) {
+      this.wipeMsg = { kind: 'fail', text: (err as Error).message ?? 'Reset failed' };
+    } finally {
+      this.wiping = null;
+    }
   }
 
   private async onCopyUrl(url: string): Promise<void> {
@@ -720,8 +751,49 @@ export class SettingsView extends LitElement {
                     : null}
                 </div>
                 ${this.renderAccess()}
+                ${this.renderResetData()}
               </div>
             `}
+    `;
+  }
+
+  /** Reset-data controls: rebuild the library (keeps fixes + history) or delete
+   *  everything. Both confirm first and disable while a wipe is in flight. */
+  private renderResetData(): unknown {
+    return html`
+      <div class="section">
+        <h2>Reset data</h2>
+
+        <div class="sub-label">Rebuild library</div>
+        <p class="hint">
+          Clears the scanned library so the next refresh re-identifies and
+          re-probes every file from scratch. Your manual title fixes and watch
+          history are kept. Use this if identification or probe data looks wrong.
+        </p>
+        <button
+          class="danger"
+          ?disabled=${this.wiping !== null}
+          @click=${(): void => { void this.onWipeDb('library'); }}
+        >${this.wiping === 'library' ? 'Rebuilding…' : 'Rebuild library'}</button>
+
+        <div class="sub-label" style="margin-top:24px">Delete everything</div>
+        <p class="hint">
+          Wipes the entire database — the library <strong>and</strong> your
+          manual title fixes and watch history. Starts completely fresh. This
+          cannot be undone.
+        </p>
+        <button
+          class="danger"
+          ?disabled=${this.wiping !== null}
+          @click=${(): void => { void this.onWipeDb('all'); }}
+        >${this.wiping === 'all' ? 'Deleting…' : 'Delete everything'}</button>
+
+        ${this.wipeMsg
+          ? html`<div class="status ${this.wipeMsg.kind}" style="margin-top:12px">
+              ${this.wipeMsg.text}
+            </div>`
+          : null}
+      </div>
     `;
   }
 

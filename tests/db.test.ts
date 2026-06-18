@@ -721,4 +721,77 @@ describe('db', () => {
     expect(row.confidence).toBe(0.92);
     expect(row.identification_json).toBe('{"score":0.92}');
   });
+
+  describe('wipe', () => {
+    /** Seed one series + episode, a movie + media_file, a review item, a
+     *  scan_run, a playback row, and a manual override. */
+    function seed(): void {
+      const series = db.upsertItem({
+        path: 'The Bear', type: 'series', tmdb_id: 1, title: 'The Bear', year: 2022,
+        poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+      });
+      db.upsertEpisode({
+        series_id: series.id, path: 'The Bear/S01E01.mkv', season: 1, episode: 1,
+        title: 'Pilot', overview: null, still_url: null, mtime: 1, scanned_at: 1,
+      });
+      const movie = db.upsertItem({
+        path: 'Dune.mkv', type: 'movie', tmdb_id: 2, title: 'Dune', year: 2021,
+        poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+      });
+      db.upsertMediaFile({ item_id: movie.id, path: 'Dune.mkv', mtime: 1, scanned_at: 1 });
+      db.upsertReviewItem({
+        path: 'Mystery.mkv', reason: 'no_results', candidates: '[]', added_at: 1, scanned_at: 1,
+      });
+      db.openScanRun('smart');
+      db.upsertPlayback({ path: 'Dune.mkv', position: 50, duration: 100, updated_at: 1 });
+      db.setManualOverride({
+        path: 'Dune.mkv', tmdb_id: 2, type: 'movie', reason: 'manual', decided_at: 1,
+      });
+    }
+
+    function count(table: string): number {
+      return (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    }
+
+    it("scope 'library' clears scanned data but keeps overrides + playback", () => {
+      seed();
+      const counts = db.wipe('library');
+
+      // Library tables emptied.
+      expect(count('media_items')).toBe(0);
+      expect(count('episodes')).toBe(0);
+      expect(count('media_files')).toBe(0);
+      expect(count('needs_review')).toBe(0);
+      expect(count('scan_runs')).toBe(0);
+      // User-owned tables preserved.
+      expect(count('manual_overrides')).toBe(1);
+      expect(count('playback_state')).toBe(1);
+
+      // Returned counts reflect what was deleted.
+      expect(counts.media_items).toBe(2);
+      expect(counts.episodes).toBe(1);
+      expect(counts).not.toHaveProperty('manual_overrides');
+    });
+
+    it("scope 'all' clears every table including overrides + playback", () => {
+      seed();
+      const counts = db.wipe('all');
+
+      expect(count('media_items')).toBe(0);
+      expect(count('episodes')).toBe(0);
+      expect(count('media_files')).toBe(0);
+      expect(count('needs_review')).toBe(0);
+      expect(count('scan_runs')).toBe(0);
+      expect(count('manual_overrides')).toBe(0);
+      expect(count('playback_state')).toBe(0);
+
+      expect(counts.manual_overrides).toBe(1);
+      expect(counts.playback_state).toBe(1);
+    });
+
+    it('is a no-op on an already-empty DB', () => {
+      const counts = db.wipe('all');
+      expect(Object.values(counts).every((n) => n === 0)).toBe(true);
+    });
+  });
 });

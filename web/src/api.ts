@@ -357,6 +357,26 @@ export async function apiSettingsRestart(): Promise<void> {
   }
 }
 
+export interface WipeDbResult {
+  ok: true;
+  scope: 'library' | 'all';
+  cleared: number;
+  counts: Record<string, number>;
+}
+
+/** Wipe the database. 'library' keeps manual fixes + watch history and lets the
+ *  next refresh rebuild; 'all' clears everything. 409 if a scan is running. */
+export async function apiSettingsWipeDb(scope: 'library' | 'all'): Promise<WipeDbResult> {
+  const r = await fetch('/api/settings/wipe-db', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope }),
+  });
+  if (r.status === 409) throw new Error('A scan is in progress — try again when it finishes.');
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as WipeDbResult;
+}
+
 export const subsUrl = (relPath: string): string =>
   `/api/subs/${encodeURIComponent(relPath)}`;
 

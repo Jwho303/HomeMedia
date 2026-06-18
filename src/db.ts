@@ -339,6 +339,16 @@ export interface DbHandle {
   closeScanRunError(runId: number, message: string): void;
   /** 0.1.10 — fetch a scan_runs row by id (mostly for tests). */
   getScanRun(runId: number): ScanRunRow | undefined;
+  /**
+   * Wipe library data in one transaction. Two scopes:
+   *   - 'library': clears scanned/identified/probed data (media_items, episodes,
+   *     media_files, needs_review, scan_runs). The next scan re-identifies and
+   *     re-probes everything. PRESERVES manual_overrides (the user's title fixes)
+   *     and playback_state (watch history / resume positions).
+   *   - 'all': also clears manual_overrides and playback_state — a brand-new DB.
+   * Returns the number of rows deleted per table for the confirmation message.
+   */
+  wipe(scope: 'library' | 'all'): Record<string, number>;
   close(): void;
 }
 
@@ -1069,6 +1079,32 @@ export function openDb(dbPath: string): DbHandle {
       stmts.deleteOverride.run(p);
     },
     listManualOverrides: () => stmts.listOverrides.all(),
+    wipe: (scope) => {
+      // Order matters: child tables (FK references to media_items) first, then
+      // media_items, so the deletes don't depend on ON DELETE CASCADE firing.
+      // 'all' additionally clears the user-owned tables.
+      const libraryTables = [
+        'media_files',
+        'episodes',
+        'needs_review',
+        'media_items',
+        'scan_runs',
+      ];
+      const userTables = ['manual_overrides', 'playback_state'];
+      const tables = scope === 'all' ? [...libraryTables, ...userTables] : libraryTables;
+      const counts: Record<string, number> = {};
+      const run = db.transaction(() => {
+        for (const t of tables) {
+          const r = db.prepare(`DELETE FROM ${t}`).run();
+          counts[t] = r.changes;
+        }
+      });
+      run();
+      // Reclaim the freed pages so the .db file actually shrinks after a wipe.
+      // VACUUM can't run inside a transaction, so it follows the txn above.
+      db.exec('VACUUM');
+      return counts;
+    },
     close: () => db.close(),
   };
 

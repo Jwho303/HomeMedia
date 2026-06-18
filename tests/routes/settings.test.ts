@@ -298,3 +298,86 @@ describe('POST /api/settings/port', () => {
     expect(reloadConfig().port).toBe(9090);
   });
 });
+
+describe('POST /api/settings/wipe-db', () => {
+  afterEach(async () => {
+    const { setDb } = await import('../../src/db.js');
+    setDb(null);
+  });
+
+  async function seededApp() {
+    const { openDb, setDb } = await import('../../src/db.js');
+    const db = openDb(':memory:');
+    const movie = db.upsertItem({
+      path: 'Dune.mkv', type: 'movie', tmdb_id: 2, title: 'Dune', year: 2021,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    db.upsertMediaFile({ item_id: movie.id, path: 'Dune.mkv', mtime: 1, scanned_at: 1 });
+    db.upsertPlayback({ path: 'Dune.mkv', position: 50, duration: 100, updated_at: 1 });
+    db.setManualOverride({
+      path: 'Dune.mkv', tmdb_id: 2, type: 'movie', reason: 'manual', decided_at: 1,
+    });
+    setDb(db);
+    const { buildServer } = await import('../../src/server.js');
+    return { app: await buildServer(), db };
+  }
+
+  it("scope 'library' clears the library but keeps overrides + playback", async () => {
+    const { app, db } = await seededApp();
+    try {
+      const res = await app.inject({
+        method: 'POST', url: '/api/settings/wipe-db', payload: { scope: 'library' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().ok).toBe(true);
+      expect(db.listLibrary({ includeStale: true })).toHaveLength(0);
+      expect(db.listManualOverrides()).toHaveLength(1);
+      expect(db.getPlayback('Dune.mkv')).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("scope 'all' clears everything", async () => {
+    const { app, db } = await seededApp();
+    try {
+      const res = await app.inject({
+        method: 'POST', url: '/api/settings/wipe-db', payload: { scope: 'all' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(db.listLibrary({ includeStale: true })).toHaveLength(0);
+      expect(db.listManualOverrides()).toHaveLength(0);
+      expect(db.getPlayback('Dune.mkv')).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects an unknown scope with 400', async () => {
+    const { app } = await seededApp();
+    try {
+      const res = await app.inject({
+        method: 'POST', url: '/api/settings/wipe-db', payload: { scope: 'nope' },
+      });
+      expect(res.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 409 when a scan is in progress', async () => {
+    const { app } = await seededApp();
+    const { tryAcquire } = await import('../../src/scan-lock.js');
+    const release = tryAcquire(); // simulate an in-flight scan holding the lock
+    try {
+      const res = await app.inject({
+        method: 'POST', url: '/api/settings/wipe-db', payload: { scope: 'library' },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toBe('scan_in_progress');
+    } finally {
+      release?.();
+      await app.close();
+    }
+  });
+});
