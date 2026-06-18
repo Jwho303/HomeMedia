@@ -12,7 +12,7 @@ own computer.
 
 ## Getting started (the easy way)
 
-You only do steps 1–2 once.
+Three steps, and the app guides you through the setup itself.
 
 ### 1. Get the HomeMedia files
 
@@ -21,17 +21,7 @@ then unzip it somewhere easy to find (like your Desktop).
 
 > Already comfortable with git? `git clone https://github.com/Jwho303/HomeMedia.git` instead.
 
-### 2. Get a free movie-database key
-
-HomeMedia uses **TMDB** (a free movie database) to find cover art and titles.
-
-1. Make a free account at **https://www.themoviedb.org/signup**
-2. Go to **https://www.themoviedb.org/settings/api** and request an API key
-   (choose "Developer", accept the terms).
-3. Copy the **API Key (v3 auth)** string — you'll paste it into HomeMedia in a
-   moment. Keep it handy.
-
-### 3. Start HomeMedia
+### 2. Start HomeMedia
 
 Open the `scripts` folder and **double-click**:
 
@@ -50,16 +40,26 @@ On your phone/TV, open:   http://192.168.1.20:3000
 
 Leave that window open while you're watching. Closing it stops HomeMedia.
 
-### 4. Open it and finish setup
+### 3. Open it and follow the setup screen
 
-Open the address in your web browser. The first time, HomeMedia walks you
-through a short setup:
+Open that address in your web browser. The first time, HomeMedia shows a short
+setup screen that walks you through everything — **you don't need to prepare
+anything in advance**:
 
-- Paste in the **TMDB key** from step 2.
-- Point it at your **media folder** (where your movie/TV files live).
+- **Get your free movie-database key.** HomeMedia uses **TMDB** (a free movie
+  database) for cover art and titles. The setup screen has a **"Get a key"**
+  link that takes you straight to the sign-up page — make a free account, copy
+  the key it gives you, and paste it back into HomeMedia. (Optional OMDb/TVDB
+  keys work the same way, with their own links, if you want them later.)
+- **Point it at your media folder** — the folder where your movie and TV files
+  live.
 
-Then it scans your folder and builds your library. Done — click a poster and
-press play.
+When you're done, HomeMedia scans your folder and builds your library. Click a
+poster and press play.
+
+> You can change any of this later under the **Settings** (gear) screen — the
+> same **"Get a key"** links and a **"Test"** button to check a key are there
+> too.
 
 ---
 
