@@ -1,113 +1,168 @@
 # HomeMedia
 
-Personal media browser and player for a single mixed-media folder. Designed
-for a Mac Mini that mounts a Windows SMB share and serves the library to a
-browser on `localhost`. Avoids native players (and the Catalina VLC
-grey-screen bug) by streaming through `<video>` with byte-range and an
-optional ffmpeg HLS path.
+A self-hosted media browser and player for a single mixed-media folder.
+Point it at a directory of movies and TV files, and it identifies them
+against TMDB, builds a poster-grid library, and streams them to any browser
+on your network — no native player, no transcoding pipeline to babysit.
 
-See [Brief.md](Brief.md) for the original design rationale and constraints.
+Built for the simplest possible home setup: one machine holds the media and
+runs the server; everything else is just a web browser.
 
-## What it does
+> **Why it exists:** to browse and play a messy download folder from the
+> couch without installing a media-server stack, and without hitting the
+> macOS VLC grey-screen bug. It streams through the browser's native
+> `<video>` element, remuxing or transcoding on the fly only when a file's
+> codec isn't browser-compatible.
 
-- Walks a media root, parses filenames with `parse-torrent-title`, and
-  identifies movies and series via TMDB (with optional OMDb / TVDB
-  corroboration).
-- Caches identification, episode metadata, and ffprobe results in SQLite so
-  browsing keeps working when the share is offline.
-- Serves a Lit-based tile grid → detail → player UI. Resume position,
-  auto-mark watched, next-episode autoplay, sibling `.srt`/`.vtt`
-  subtitles.
-- Streams browser-compatible files directly with byte-range; remuxes MKV
-  (`-c copy`) on the fly; falls back to an HLS session (NVENC where
-  available) for incompatible codecs.
-- Surfaces share state (`/api/share/status`) and exposes a Reconnect action
-  when the SMB mount goes stale.
-- Provides a `npm run review` CLI for manually rescuing files the
-  identifier couldn't pin down.
+## Features
 
-## Layout
+- **Automatic identification** — walks your media root, parses filenames
+  with [`parse-torrent-title`](https://github.com/clems4ever/parse-torrent-title),
+  and matches movies and series against TMDB, with optional OMDb / TVDB
+  corroboration for the tricky ones.
+- **Works offline** — identification, episode metadata, and ffprobe results
+  are cached in SQLite, so browsing keeps working even when the media share
+  is unreachable.
+- **Browser playback** — poster grid → detail → player, with resume
+  position, auto-mark-watched, next-episode autoplay, and sibling
+  `.srt` / `.vtt` / embedded subtitles.
+- **Smart streaming** — plays browser-compatible files directly with HTTP
+  byte-range; remuxes MKV on the fly; falls back to an HLS session (NVENC
+  hardware encode where available) for incompatible codecs.
+- **First-run setup wizard** — a fresh clone boots into a guided wizard;
+  configure your TMDB key and media folder right in the UI (no manual
+  `.env` editing required). Settings, including key rotation, stay editable
+  in-app afterward. API keys are stored locally and never exposed back to
+  the browser.
+- **Manual rescue** — when the identifier picks the wrong title, fix it from
+  the UI (paste a TMDB / IMDb link) or the `npm run review` CLI.
 
-- [src/](src/) — Fastify + TypeScript backend (Node 20+).
-  - [src/server.ts](src/server.ts) — entry point.
-  - [src/scan.ts](src/scan.ts), [src/identify/](src/identify/) — folder walk and identification pipeline.
-  - [src/streaming/](src/streaming/), [src/routes/stream.ts](src/routes/stream.ts), [src/routes/hls.ts](src/routes/hls.ts) — byte-range, remux, HLS sessions.
-  - [src/cli/](src/cli/) — `scan` and `review` CLIs.
-- [web/](web/) — Lit frontend, built with Vite.
-- [schema.sql](schema.sql) — SQLite schema (idempotent; applied on every open).
-- [docs/specs/](docs/specs/) — phased implementation specs (0.1.1 → 0.1.7).
-- [DEPLOY.md](DEPLOY.md) — runbook for the HLS cache, log tags, and quiet-console behavior.
+## How it's deployed
 
-## Setup
-
-Requires Node 20+ and `ffmpeg` / `ffprobe` on `PATH`.
-
-```bash
-cp .env.example .env
-# fill in TMDB_API_KEY and MEDIA_ROOT (absolute path to the share mount)
-
-npm install
-npm --prefix web install
+```
+┌──────────────────────────┐         ┌──────────────────────┐
+│  Server machine          │  LAN    │  Any browser         │
+│  • holds the media       │ <─────> │  • laptop / TV / iPad│
+│  • runs HomeMedia (:3000)│         │  • just opens the URL│
+└──────────────────────────┘         └──────────────────────┘
 ```
 
-`.env` keys (see [.env.example](.env.example) for the full list):
+The server runs on whichever machine has the media (locally or via a mounted
+SMB share). Clients are ordinary browsers on the same network pointed at
+`http://<server-ip>:3000`. If the media lives on a separate box behind an SMB
+mount, HomeMedia surfaces a "share offline" state and a Reconnect action
+rather than crashing when that mount goes stale.
 
-| Key            | Required | Notes                                         |
-|----------------|----------|-----------------------------------------------|
-| `TMDB_API_KEY` | yes      | v3 key, not the v4 JWT                        |
-| `MEDIA_ROOT`   | yes      | e.g. `/Volumes/media` or `D:\TestMedia`       |
-| `OMDB_API_KEY` | no       | enables OMDb in the multi-source rescue pass  |
-| `TVDB_API_KEY` | no       | enables TVDB in the multi-source rescue pass  |
-| `PORT`         | no       | defaults to 3000                              |
-| `DB_PATH`      | no       | defaults to `data/media.db`                   |
+## Requirements
 
-## Running
+- **Node 20+**
+- **`ffmpeg` / `ffprobe`** on your `PATH` (used for probing, remux, and HLS)
+- A **free TMDB v3 API key** — https://www.themoviedb.org/settings/api
+  (use the v3 *API Key* string, not the v4 read-access JWT)
+
+## Quick start
 
 ```bash
-npm run scan         # populate / refresh the DB from MEDIA_ROOT
-npm run review       # CLI for manually identifying low-confidence files
+git clone https://github.com/Jwho303/HomeMedia.git
+cd HomeMedia
+
+npm install
+npm run build        # builds the web frontend
+
+npm start            # starts the server on http://localhost:3000
+```
+
+Open `http://localhost:3000` and the **setup wizard** walks you through
+entering your TMDB key and pointing at your media folder. Then trigger the
+first scan from the UI (or run `npm run scan`) and your library appears.
+
+> Prefer config files? Copy `.env.example` to `.env` and fill in
+> `TMDB_API_KEY` and `MEDIA_ROOT` instead — the wizard is skipped once both
+> are set. See [`.env.example`](.env.example) for every available option
+> (player concurrency, encoder pacing, idle timeouts, etc.).
+
+| Key            | Required | Notes                                          |
+|----------------|----------|------------------------------------------------|
+| `TMDB_API_KEY` | yes\*    | v3 key, not the v4 JWT (\*or set it in the UI) |
+| `MEDIA_ROOT`   | yes\*    | absolute path to the media folder              |
+| `OMDB_API_KEY` | no       | enables OMDb in the multi-source rescue pass   |
+| `TVDB_API_KEY` | no       | enables TVDB in the multi-source rescue pass   |
+| `PORT`         | no       | defaults to 3000                               |
+| `DB_PATH`      | no       | defaults to `data/media.db`                    |
+
+## Development
+
+```bash
+npm run dev:all      # backend (:3000) + Vite dev server (:5173), proxied
 npm run dev          # backend only, watching src/
-npm run dev:all      # backend + Vite dev server (web on :5173, proxied to :3000)
-npm start            # backend, no watch
-npm run build        # build the web bundle into web/dist
-npm test             # vitest
+npm run scan         # populate / refresh the DB from MEDIA_ROOT
+npm run review       # CLI to manually identify low-confidence files
+npm test             # vitest (backend)
+npm --prefix web test
 npm run typecheck
 ```
 
-The Vite dev server proxies `/api` to `http://127.0.0.1:3000`, so run
-`dev:all` for full-stack iteration.
+The Vite dev server (`:5173`) proxies `/api` to `http://127.0.0.1:3000`, so
+`dev:all` gives you full-stack hot reload.
+
+## Project layout
+
+- [`src/`](src/) — Fastify + TypeScript backend (Node 20+).
+  - [`src/server.ts`](src/server.ts) — entry point and route registration.
+  - [`src/scan.ts`](src/scan.ts), [`src/identify/`](src/identify/) — folder
+    walk and the TMDB / OMDb / TVDB identification pipeline.
+  - [`src/streaming/`](src/streaming/), [`src/player/`](src/player/),
+    [`src/routes/playback.ts`](src/routes/playback.ts) — byte-range
+    streaming, server-driven player instances, and HLS sessions.
+  - [`src/cli/`](src/cli/) — `scan` and `review` CLIs.
+- [`web/`](web/) — Lit frontend, built with Vite.
+- [`schema.sql`](schema.sql) — SQLite schema (idempotent; applied on open).
+- [`docs/specs/`](docs/specs/) — phased implementation specs (0.1.1 → 0.1.13),
+  the running design log for the project.
+- [`DEPLOY.md`](DEPLOY.md) — operational runbook: HLS cache, log tags, quiet
+  console, reconnect overlay.
+- [`Brief.md`](Brief.md) — the original design brief and rationale.
 
 ## API surface
 
+A representative subset (see [`src/routes/`](src/routes/) for the full set):
+
 ```
+GET  /api/setup-state               first-run wizard state
+GET  /api/settings                  current config (secrets masked)
+POST /api/settings                  update config
+
 GET  /api/share/status              { online, mountPath, lastSeen }
 POST /api/share/reconnect           remount; returns updated status
 
-GET  /api/library                   tiles (cache-only)
+GET  /api/library                   library tiles (cache-only)
 GET  /api/series/:id                series + episode list (cache-only)
-GET  /api/playback/:path            resume position, watched
-POST /api/playback/:path            { position, duration }
+GET  /api/playback/*                resume position, watched
+POST /api/playback/*                { position, duration }
 
 POST /api/refresh                   incremental scan (mtime diff)
 POST /api/refresh?full=true         re-query TMDB for everything
 
-GET  /api/stream/:path              range-aware file stream
-GET  /api/stream/:path?remux=true   ffmpeg -c copy → fMP4
-GET  /api/hls/:sessionId/...        HLS segments (when HLS_PLAYER=true)
+POST /api/player/:playerId/open     open media in a server-driven player
+POST /api/player/:playerId/state    client position heartbeat
+GET  /api/hls/:sessionId/...        HLS playlist + segments
+
+GET  /api/manual-identify/search    search candidates for a wrong match
+POST /api/manual-identify/item/:id  apply a chosen identity
 ```
 
-Endpoints that need the share return `503 { error: 'share_offline' }` when
-the mount is stale; the UI uses this to drive the persistent share-status
-banner.
+Endpoints that need the media share return `503 { error: 'share_offline' }`
+when the mount is stale; the UI uses this to drive its share-status banner.
 
-## Deployment
+## Non-goals
 
-Production runs as a service. The HLS cache, log tag reference, and quiet
-console behavior are documented in [DEPLOY.md](DEPLOY.md). The Windows
-deployment notes live in [docs/specs/0.1.5.3-windows-deployment.md](docs/specs/0.1.5.3-windows-deployment.md).
+Automation (Sonarr/Radarr-style), multi-user accounts or per-user watched
+state, music / photo libraries, remote/internet viewing, and a full
+transcoding farm. HomeMedia stays deliberately small: one folder, one
+server, browser playback.
 
-## Non-goals (v1)
+## License
 
-Software on the Windows box beyond the SMB share, transcoding (remux only),
-mobile / remote viewing, multi-user watched state, music, photos,
-Sonarr/Radarr-style automation.
+No license is currently specified. Until one is added, this is "all rights
+reserved" by default — feel free to read and learn from it, and open an issue
+if you'd like a permissive license added.
