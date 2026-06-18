@@ -1,85 +1,126 @@
 # HomeMedia
 
-A self-hosted media browser and player for a single mixed-media folder.
-Point it at a directory of movies and TV files, and it identifies them
-against TMDB, builds a poster-grid library, and streams them to any browser
-on your network — no native player, no transcoding pipeline to babysit.
+**Watch your own movies and TV shows in any web browser — on your laptop, phone, tablet, or TV.**
 
-Built for the simplest possible home setup: one machine holds the media and
-runs the server; everything else is just a web browser.
+HomeMedia looks at a folder of movie and TV files on your computer, figures
+out what each one is (cover art, titles, episode names), and turns it into a
+tidy, clickable library you can play from any device on your home Wi-Fi. No
+subscriptions, no uploading anything to the internet — it all stays on your
+own computer.
 
-> **Why it exists:** to browse and play a messy download folder from the
-> couch without installing a media-server stack, and without hitting the
-> macOS VLC grey-screen bug. It streams through the browser's native
-> `<video>` element, remuxing or transcoding on the fly only when a file's
-> codec isn't browser-compatible.
+---
 
-## Features
+## Getting started (the easy way)
 
-- **Automatic identification** — walks your media root, parses filenames
-  with [`parse-torrent-title`](https://github.com/clems4ever/parse-torrent-title),
-  and matches movies and series against TMDB, with optional OMDb / TVDB
-  corroboration for the tricky ones.
-- **Works offline** — identification, episode metadata, and ffprobe results
-  are cached in SQLite, so browsing keeps working even when the media share
-  is unreachable.
-- **Browser playback** — poster grid → detail → player, with resume
-  position, auto-mark-watched, next-episode autoplay, and sibling
-  `.srt` / `.vtt` / embedded subtitles.
-- **Smart streaming** — plays browser-compatible files directly with HTTP
-  byte-range; remuxes MKV on the fly; falls back to an HLS session (NVENC
-  hardware encode where available) for incompatible codecs.
-- **First-run setup wizard** — a fresh clone boots into a guided wizard;
-  configure your TMDB key and media folder right in the UI (no manual
-  `.env` editing required). Settings, including key rotation, stay editable
-  in-app afterward. API keys are stored locally and never exposed back to
-  the browser.
-- **Manual rescue** — when the identifier picks the wrong title, fix it from
-  the UI (paste a TMDB / IMDb link) or the `npm run review` CLI.
+You only do steps 1–2 once.
 
-## How it's deployed
+### 1. Get the HomeMedia files
+
+Click the green **Code** button near the top of this page → **Download ZIP**,
+then unzip it somewhere easy to find (like your Desktop).
+
+> Already comfortable with git? `git clone https://github.com/Jwho303/HomeMedia.git` instead.
+
+### 2. Get a free movie-database key
+
+HomeMedia uses **TMDB** (a free movie database) to find cover art and titles.
+
+1. Make a free account at **https://www.themoviedb.org/signup**
+2. Go to **https://www.themoviedb.org/settings/api** and request an API key
+   (choose "Developer", accept the terms).
+3. Copy the **API Key (v3 auth)** string — you'll paste it into HomeMedia in a
+   moment. Keep it handy.
+
+### 3. Start HomeMedia
+
+Open the `scripts` folder and **double-click**:
+
+- **Windows:** `start-homemedia.bat`
+- **Mac:** `start-homemedia.command`
+  *(First time, Mac may block it — right-click the file → **Open** → **Open**.)*
+
+The very first time, it will spend a few minutes downloading what it needs and
+setting itself up. **This is automatic** — you don't have to install anything
+yourself. When it's ready, it shows you a web address like:
 
 ```
-┌──────────────────────────┐         ┌──────────────────────┐
-│  Server machine          │  LAN    │  Any browser         │
-│  • holds the media       │ <─────> │  • laptop / TV / iPad│
-│  • runs HomeMedia (:3000)│         │  • just opens the URL│
-└──────────────────────────┘         └──────────────────────┘
+On THIS computer, open:   http://localhost:3000
+On your phone/TV, open:   http://192.168.1.20:3000
 ```
 
-The server runs on whichever machine has the media (locally or via a mounted
-SMB share). Clients are ordinary browsers on the same network pointed at
-`http://<server-ip>:3000`. If the media lives on a separate box behind an SMB
-mount, HomeMedia surfaces a "share offline" state and a Reconnect action
-rather than crashing when that mount goes stale.
+Leave that window open while you're watching. Closing it stops HomeMedia.
 
-## Requirements
+### 4. Open it and finish setup
+
+Open the address in your web browser. The first time, HomeMedia walks you
+through a short setup:
+
+- Paste in the **TMDB key** from step 2.
+- Point it at your **media folder** (where your movie/TV files live).
+
+Then it scans your folder and builds your library. Done — click a poster and
+press play.
+
+---
+
+## Watching on your TV, phone, or tablet
+
+As long as the other device is on the **same Wi-Fi**, just open the
+`http://192.168.x.x:3000` address that the start window printed. Bookmark it
+and you're set.
+
+> If another device can't connect, your computer's firewall may be blocking
+> it. On Windows, allow the app through when prompted (or allow inbound TCP
+> port 3000). On Mac, allow incoming connections when asked.
+
+---
+
+## Everyday use
+
+- **To watch:** double-click the start file, open the address, pick something.
+- **Added new movies/TV?** Use the **Refresh** button in HomeMedia to pull in
+  new files. (It only looks at what changed, so it's quick.)
+- **Wrong cover or title?** Open the item and use **Identify** to fix it —
+  paste a TMDB or IMDb link for the correct one.
+- **To stop:** close the start window.
+
+---
+
+## What HomeMedia does and doesn't do
+
+**It does:** browse and play one folder of movies and TV in the browser,
+remember your place, auto-play the next episode, show subtitles, and keep
+working even if the media drive briefly disconnects.
+
+**It doesn't:** download or manage content for you, support multiple separate
+user accounts, handle music or photos, or stream over the internet (it's for
+your home network). It deliberately stays small and simple.
+
+---
+
+<details>
+<summary><strong>For developers / advanced setup</strong> (click to expand)</summary>
+
+### Requirements
+
+The start scripts fetch a portable copy of **Node.js 20+** and **ffmpeg** into
+a local `.runtime/` folder if they aren't already on your `PATH`, so no manual
+install is needed. If you'd rather use your own:
 
 - **Node 20+**
-- **`ffmpeg` / `ffprobe`** on your `PATH` (used for probing, remux, and HLS)
-- A **free TMDB v3 API key** — https://www.themoviedb.org/settings/api
-  (use the v3 *API Key* string, not the v4 read-access JWT)
+- **`ffmpeg` / `ffprobe`** on your `PATH`
 
-## Quick start
+### Manual run
 
 ```bash
-git clone https://github.com/Jwho303/HomeMedia.git
-cd HomeMedia
-
 npm install
-npm run build        # builds the web frontend
-
-npm start            # starts the server on http://localhost:3000
+npm run build        # build the web frontend
+npm start            # serve on http://localhost:3000 (set HOST=0.0.0.0 for LAN)
 ```
 
-Open `http://localhost:3000` and the **setup wizard** walks you through
-entering your TMDB key and pointing at your media folder. Then trigger the
-first scan from the UI (or run `npm run scan`) and your library appears.
-
-> Prefer config files? Copy `.env.example` to `.env` and fill in
-> `TMDB_API_KEY` and `MEDIA_ROOT` instead — the wizard is skipped once both
-> are set. See [`.env.example`](.env.example) for every available option
-> (player concurrency, encoder pacing, idle timeouts, etc.).
+Configure via the in-app wizard, or copy `.env.example` to `.env` and set
+`TMDB_API_KEY` and `MEDIA_ROOT`. Full option list (player concurrency, encoder
+pacing, idle timeouts, etc.) is documented in [`.env.example`](.env.example).
 
 | Key            | Required | Notes                                          |
 |----------------|----------|------------------------------------------------|
@@ -90,7 +131,7 @@ first scan from the UI (or run `npm run scan`) and your library appears.
 | `PORT`         | no       | defaults to 3000                               |
 | `DB_PATH`      | no       | defaults to `data/media.db`                    |
 
-## Development
+### Development
 
 ```bash
 npm run dev:all      # backend (:3000) + Vite dev server (:5173), proxied
@@ -102,10 +143,7 @@ npm --prefix web test
 npm run typecheck
 ```
 
-The Vite dev server (`:5173`) proxies `/api` to `http://127.0.0.1:3000`, so
-`dev:all` gives you full-stack hot reload.
-
-## Project layout
+### Project layout
 
 - [`src/`](src/) — Fastify + TypeScript backend (Node 20+).
   - [`src/server.ts`](src/server.ts) — entry point and route registration.
@@ -116,45 +154,19 @@ The Vite dev server (`:5173`) proxies `/api` to `http://127.0.0.1:3000`, so
     streaming, server-driven player instances, and HLS sessions.
   - [`src/cli/`](src/cli/) — `scan` and `review` CLIs.
 - [`web/`](web/) — Lit frontend, built with Vite.
+- [`scripts/`](scripts/) — one-click start launchers and helpers.
 - [`schema.sql`](schema.sql) — SQLite schema (idempotent; applied on open).
 
-## API surface
+### How streaming works
 
-A representative subset (see [`src/routes/`](src/routes/) for the full set):
+Browser-compatible files are served directly with HTTP byte-range. MKV is
+remuxed on the fly; codecs the browser can't play fall back to an HLS session
+(using NVENC hardware encoding where available). Identification, episode
+metadata, and ffprobe results are cached in SQLite so browsing keeps working
+when the media share is offline; endpoints that need the share return
+`503 { error: 'share_offline' }`, which drives the UI's reconnect banner.
 
-```
-GET  /api/setup-state               first-run wizard state
-GET  /api/settings                  current config (secrets masked)
-POST /api/settings                  update config
-
-GET  /api/share/status              { online, mountPath, lastSeen }
-POST /api/share/reconnect           remount; returns updated status
-
-GET  /api/library                   library tiles (cache-only)
-GET  /api/series/:id                series + episode list (cache-only)
-GET  /api/playback/*                resume position, watched
-POST /api/playback/*                { position, duration }
-
-POST /api/refresh                   incremental scan (mtime diff)
-POST /api/refresh?full=true         re-query TMDB for everything
-
-POST /api/player/:playerId/open     open media in a server-driven player
-POST /api/player/:playerId/state    client position heartbeat
-GET  /api/hls/:sessionId/...        HLS playlist + segments
-
-GET  /api/manual-identify/search    search candidates for a wrong match
-POST /api/manual-identify/item/:id  apply a chosen identity
-```
-
-Endpoints that need the media share return `503 { error: 'share_offline' }`
-when the mount is stale; the UI uses this to drive its share-status banner.
-
-## Non-goals
-
-Automation (Sonarr/Radarr-style), multi-user accounts or per-user watched
-state, music / photo libraries, remote/internet viewing, and a full
-transcoding farm. HomeMedia stays deliberately small: one folder, one
-server, browser playback.
+</details>
 
 ## License
 

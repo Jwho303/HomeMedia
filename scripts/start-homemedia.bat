@@ -1,0 +1,85 @@
+@echo off
+REM ============================================================
+REM  HomeMedia — one-click start for Windows.
+REM  Double-click this file. The first time, it automatically
+REM  downloads anything it needs (Node.js, ffmpeg) into a local
+REM  .runtime folder — nothing is installed on your system and
+REM  no admin rights are required. Then it starts HomeMedia and
+REM  prints the address to open.
+REM ============================================================
+
+setlocal enabledelayedexpansion
+
+REM cd to repo root (parent of this script's folder)
+cd /d "%~dp0\.."
+
+echo.
+echo ============================================
+echo    Starting HomeMedia...
+echo ============================================
+echo.
+
+REM --- Make sure Node + ffmpeg are available (fetch if missing) ---
+echo Checking requirements...
+for /f "usebackq tokens=1,* delims==" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"`) do (
+  if "%%a"=="PATHADD" set "PATH=%%b;!PATH!"
+)
+if errorlevel 1 (
+  echo [!] Could not prepare the requirements automatically.
+  echo     Please install Node.js from https://nodejs.org and try again.
+  pause
+  exit /b 1
+)
+
+REM --- Install dependencies the first time (node_modules missing) ---
+if not exist "node_modules" (
+  echo First-time setup: installing components. This can take a few minutes...
+  echo.
+  call npm install
+  if errorlevel 1 (
+    echo [!] Setup failed. Please try running this file again.
+    pause
+    exit /b 1
+  )
+  echo.
+)
+
+REM --- Build the app (fast on repeat runs) ---
+echo Preparing the app...
+call npm run build
+if errorlevel 1 (
+  echo [!] Build failed.
+  pause
+  exit /b 1
+)
+
+REM --- Detect this computer's network address ---
+set "LAN_IP="
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /R /C:"IPv4 Address"') do (
+  if not defined LAN_IP set "LAN_IP=%%a"
+)
+if defined LAN_IP set "LAN_IP=%LAN_IP:~1%"
+
+echo.
+echo ============================================
+echo    HomeMedia is starting.
+echo.
+echo    On THIS computer, open:
+echo        http://localhost:3000
+if defined LAN_IP (
+  echo.
+  echo    On a phone, tablet, or TV on the same
+  echo    Wi-Fi, open:
+  echo        http://%LAN_IP%:3000
+)
+echo.
+echo    Leave this window open while you watch.
+echo    Close it (or press Ctrl+C) to stop.
+echo ============================================
+echo.
+
+REM --- Start the server, reachable from other devices on the network ---
+set HOST=0.0.0.0
+call npm run start
+
+endlocal

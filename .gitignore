@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Portable Node / ffmpeg fetched by the start scripts (first run)
+.runtime/
+
 # Build output
 dist/
 web/dist/

@@ -1,0 +1,7 @@
+# Shell scripts and Mac launchers must use LF, even when checked out on Windows.
+*.command text eol=lf
+*.sh      text eol=lf
+*.mjs     text eol=lf
+
+# Windows batch files must use CRLF.
+*.bat     text eol=crlf
