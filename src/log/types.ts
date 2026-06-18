@@ -3,9 +3,8 @@
  *  strings; the transport falls back to a generic `log` tag for anything
  *  unaccounted-for (Fastify internals, third-party libs).
  *
- *  Adding a new event: extend the union, add the rendering case in
- *  `console-pretty.ts`, and document in DEPLOY.md if it's a tag the operator
- *  should know to grep for.
+ *  Adding a new event: extend the union and add the rendering case in
+ *  `console-pretty.ts`.
  */
 export type LogEvt =
   // request lifecycle (D3 — replaces Fastify's two-line default).
