@@ -9,10 +9,13 @@ import {
   apiSettingsPort,
   apiSettingsRestart,
   apiSettingsWipeDb,
+  apiLibraryHidden,
+  apiLibraryRestore,
   type SettingsField,
   type SettingsState,
   type SettingsFieldState,
   type SettingsAccess,
+  type HiddenItem,
 } from '../api.js';
 import { iconBackChevron } from './icons.js';
 
@@ -327,6 +330,40 @@ export class SettingsView extends LitElement {
     }
     button.danger:hover:not(:disabled) { background: rgba(248, 81, 73, 0.1); }
     button.danger:disabled { opacity: 0.5; cursor: default; }
+
+    /* Library-health hidden-items list. */
+    .hidden-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .hidden-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: var(--surface-elevated);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+    }
+    .hidden-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    .hidden-title {
+      font-size: 13px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hidden-sub {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
   `;
 
   @state() private settings: SettingsState | null = null;
@@ -351,12 +388,56 @@ export class SettingsView extends LitElement {
   // Reset-data section.
   @state() private wiping: 'library' | 'all' | null = null;
   @state() private wipeMsg: { kind: 'ok' | 'fail'; text: string } | null = null;
+  // Library-health (hidden items) section.
+  @state() private hiddenItems: HiddenItem[] | null = null;
+  @state() private hiddenLoading = false;
+  @state() private restoringId: number | null = null;
+  @state() private hiddenMsg: { kind: 'ok' | 'fail'; text: string } | null = null;
   private readonly pickerAvailable = folderPickerAvailable();
 
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
     void this.loadAccess();
+    void this.loadHidden();
+  }
+
+  private async loadHidden(): Promise<void> {
+    this.hiddenLoading = true;
+    try {
+      this.hiddenItems = await apiLibraryHidden();
+    } catch {
+      // Non-critical: leave the section showing "couldn't load".
+      this.hiddenItems = null;
+    } finally {
+      this.hiddenLoading = false;
+    }
+  }
+
+  private async onRestore(item: HiddenItem): Promise<void> {
+    this.restoringId = item.id;
+    this.hiddenMsg = null;
+    try {
+      const res = await apiLibraryRestore(item.id);
+      if (res.restored) {
+        this.hiddenMsg = {
+          kind: 'ok',
+          text: `Restored "${item.title ?? item.path}". It's back on the home screen.`,
+        };
+      } else {
+        this.hiddenMsg = {
+          kind: 'fail',
+          text: `"${item.title ?? item.path}" couldn't be restored — its file may no longer be on disk.`,
+        };
+      }
+      // Refresh the list and tell other views to refetch.
+      await this.loadHidden();
+      document.dispatchEvent(new CustomEvent('library-invalidated'));
+    } catch (err) {
+      this.hiddenMsg = { kind: 'fail', text: (err as Error).message ?? 'Restore failed' };
+    } finally {
+      this.restoringId = null;
+    }
   }
 
   private async load(): Promise<void> {
@@ -751,9 +832,64 @@ export class SettingsView extends LitElement {
                     : null}
                 </div>
                 ${this.renderAccess()}
+                ${this.renderLibraryHealth()}
                 ${this.renderResetData()}
               </div>
             `}
+    `;
+  }
+
+  /** Library health: items that vanished from the home screen but whose file is
+   *  still on disk (e.g. an identify mix-up cross-wired them). One-click Restore
+   *  brings each back with its existing metadata — no full library reset. */
+  private renderLibraryHealth(): unknown {
+    const items = this.hiddenItems;
+    // Hide the whole section when there's nothing to fix — the common case.
+    if (!this.hiddenLoading && (!items || items.length === 0) && !this.hiddenMsg) {
+      return null;
+    }
+    return html`
+      <div class="section">
+        <h2>Library health</h2>
+        <p class="hint">
+          These titles are on disk but stopped showing on the home screen —
+          usually after an identify mix-up. <strong>Restore</strong> brings one
+          back with its current details. If it comes back as the wrong title,
+          use <strong>Identify</strong> on its tile to fix it.
+        </p>
+        ${this.hiddenMsg
+          ? html`<div class="status ${this.hiddenMsg.kind}" style="margin-bottom:12px">
+              ${this.hiddenMsg.text}
+            </div>`
+          : null}
+        ${this.hiddenLoading
+          ? html`<div class="hint">Checking…</div>`
+          : !items || items.length === 0
+            ? html`<div class="hint">Nothing hidden — your library looks healthy.</div>`
+            : html`
+                <div class="hidden-list">
+                  ${items.map(
+                    (it) => html`
+                      <div class="hidden-row">
+                        <div class="hidden-meta">
+                          <span class="hidden-title">${it.title ?? it.path}</span>
+                          <span class="hidden-sub">
+                            ${it.type === 'series' ? 'Show' : 'Movie'}${it.year
+                              ? html` · ${it.year}`
+                              : null}
+                          </span>
+                        </div>
+                        <button
+                          class="action"
+                          ?disabled=${this.restoringId !== null}
+                          @click=${(): void => { void this.onRestore(it); }}
+                        >${this.restoringId === it.id ? 'Restoring…' : 'Restore'}</button>
+                      </div>
+                    `,
+                  )}
+                </div>
+              `}
+      </div>
     `;
   }
 

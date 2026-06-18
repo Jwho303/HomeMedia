@@ -1,3 +1,4 @@
+import { promises as fs } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
@@ -7,6 +8,9 @@ import {
   type EpisodeWithPlaybackRow,
   type ItemPlaybackAggregate,
 } from '../db.js';
+import { config } from '../config.js';
+import { toNativeAbsolute } from '../paths.js';
+import { tryAcquire } from '../scan-lock.js';
 
 interface LibraryItemDto {
   id: number;
@@ -246,4 +250,147 @@ export async function registerLibraryRoutes(app: FastifyInstance): Promise<void>
     }
     return reply.code(204).send();
   });
+
+  // 0.1.14 — Hidden-items recovery surface (Settings → Library health).
+  //
+  // A movie/series can be tombstoned (deleted_at != NULL) yet still have its
+  // file on disk — the LOTR cross-wiring bug being the motivating case. The
+  // home grid hides these, and re-scan alone won't surface them (the file is
+  // "alive" on disk, just attached to the wrong item). These endpoints let a
+  // non-technical user see and recover them without a full library reset.
+
+  // List tombstoned items whose representative file STILL EXISTS on disk. The
+  // disk check runs on request (accurate, modest cost for a settings screen).
+  app.get('/api/library/hidden', async () => {
+    const db = getDb();
+    const root = config.mediaRoot;
+    const rows = db.raw
+      .prepare<[], MediaItemRow>(
+        `SELECT * FROM media_items WHERE deleted_at IS NOT NULL ORDER BY title ASC`,
+      )
+      .all();
+
+    const out: Array<{
+      id: number;
+      type: 'movie' | 'series';
+      title: string | null;
+      year: number | null;
+      posterUrl: string | null;
+      path: string;
+      deletedAt: number | null;
+    }> = [];
+
+    for (const row of rows) {
+      // The path to probe on disk: for movies, the playable file (the item's
+      // own path, or any media_files row — even tombstoned ones still record
+      // the path); for series, the most recent episode path.
+      const probePath = await firstExistingPath(db, row, root);
+      if (!probePath) continue; // genuinely gone from disk — correctly hidden.
+      out.push({
+        id: row.id,
+        type: row.type,
+        title: row.title,
+        year: row.year,
+        posterUrl: row.poster_url,
+        path: probePath,
+        deletedAt: row.deleted_at ?? null,
+      });
+    }
+    return { items: out };
+  });
+
+  // Restore a hidden item cheaply: re-parent any on-disk file that belongs to
+  // it by path, clear the tombstone, and revive its on-disk children. No TMDB
+  // calls — the item keeps its existing (already-correct) metadata. Use this
+  // when the item just needs to reappear; use manual-identify to re-identify.
+  app.post('/api/library/hidden/:id/restore', async (req, reply) => {
+    const parsed = seriesParamsSchema.safeParse(req.params);
+    if (!parsed.success) return reply.code(400).send({ error: 'bad_id' });
+
+    const release = tryAcquire();
+    if (!release) return reply.code(409).send({ error: 'scan_in_progress' });
+    try {
+      const db = getDb();
+      const item = db.raw
+        .prepare<[number], MediaItemRow>(`SELECT * FROM media_items WHERE id = ?`)
+        .get(parsed.data.id);
+      if (!item) return reply.code(404).send({ error: 'not_found' });
+
+      const root = config.mediaRoot;
+      const restored = db.raw.transaction(() => {
+        if (item.type === 'movie') {
+          // Re-point any media_files row whose path equals this item's own path
+          // (the mis-parent case) back to this item, then revive its files.
+          db.raw
+            .prepare<[number, string]>(
+              `UPDATE media_files SET item_id = ?, deleted_at = NULL WHERE path = ?`,
+            )
+            .run(item.id, item.path);
+          db.raw
+            .prepare<[number]>(
+              `UPDATE media_files SET deleted_at = NULL WHERE item_id = ?`,
+            )
+            .run(item.id);
+        } else {
+          db.raw
+            .prepare<[number]>(
+              `UPDATE episodes SET deleted_at = NULL WHERE series_id = ?`,
+            )
+            .run(item.id);
+        }
+        db.raw
+          .prepare<[number]>(`UPDATE media_items SET deleted_at = NULL WHERE id = ?`)
+          .run(item.id);
+      });
+      restored();
+
+      // Confirm the item actually has a live, on-disk child now; if not, the
+      // restore was cosmetic and the next scan would re-tombstone it. Report
+      // that honestly rather than claiming success.
+      const onDisk = await firstExistingPath(
+        db,
+        db.raw.prepare<[number], MediaItemRow>(`SELECT * FROM media_items WHERE id = ?`).get(item.id)!,
+        root,
+      );
+      return { ok: true, restored: onDisk != null, id: item.id };
+    } finally {
+      release();
+    }
+  });
+}
+
+/** Resolve the first path belonging to `row` that still exists on disk, or
+ *  null if none do. Movies: the item path + every media_files path (including
+ *  tombstoned ones — we're checking disk, not DB aliveness). Series: every
+ *  episode path. */
+async function firstExistingPath(
+  db: ReturnType<typeof getDb>,
+  row: MediaItemRow,
+  root: string,
+): Promise<string | null> {
+  const candidates: string[] = [];
+  if (row.type === 'movie') {
+    candidates.push(row.path);
+    const files = db.raw
+      .prepare<[number], { path: string }>(`SELECT path FROM media_files WHERE item_id = ?`)
+      .all(row.id);
+    for (const f of files) candidates.push(f.path);
+  } else {
+    const eps = db.raw
+      .prepare<[number], { path: string }>(
+        `SELECT path FROM episodes WHERE series_id = ? ORDER BY season DESC, episode DESC`,
+      )
+      .all(row.id);
+    for (const e of eps) candidates.push(e.path);
+  }
+  for (const rel of candidates) {
+    const abs = toNativeAbsolute(rel, root);
+    try {
+      await fs.stat(abs);
+      return rel;
+    } catch {
+      /* not on disk — try next */
+    }
+  }
+  return null;
 }

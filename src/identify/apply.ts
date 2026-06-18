@@ -74,7 +74,28 @@ function applyMovie(
   opts: ApplyOptions,
   deps: ApplyDeps,
 ): ApplyResult {
-  const existing = deps.db.getByTmdbId(identity.tmdbId, 'movie');
+  // Merge-target resolution. Two rows can claim relevance:
+  //   - byPath: the movie item whose own `path` equals this file's path. If it
+  //     exists, it is the canonical owner of this file.
+  //   - byTmdb: a (possibly different) movie item already carrying this TMDB id.
+  //
+  // The historical bug (0.1.14): this used only `byTmdb` and upserted the
+  // file's `media_files` row onto it. When `byTmdb` was a *different* row than
+  // `byPath` (e.g. the three LOTR films cross-wiring during a manual
+  // re-identify), the file was re-parented onto `byTmdb`, leaving `byPath`
+  // childless — the scan's parent-aliveness recompute then tombstoned it and
+  // the movie silently vanished from the home grid.
+  //
+  // Fix: prefer `byPath` as the merge target so the file never leaves the item
+  // that owns its path. We still want the tmdb-merge behaviour for the genuine
+  // case (a brand-new file for a movie that already exists at another path,
+  // e.g. a second rip) — that case has no `byPath` row, so `byTmdb` is used.
+  const byPath = deps.db.getByPath(relPosix);
+  const byTmdb = deps.db.getByTmdbId(identity.tmdbId, 'movie');
+  const existing =
+    byPath && byPath.type === 'movie'
+      ? byPath
+      : byTmdb ?? null;
   const genresJson =
     identity.genres && identity.genres.length > 0
       ? JSON.stringify(identity.genres)
@@ -87,7 +108,7 @@ function applyMovie(
     deps.db.raw
       .prepare(
         `UPDATE media_items
-         SET title = ?, year = ?, imdb_id = COALESCE(?, imdb_id), tvdb_id = COALESCE(?, tvdb_id),
+         SET tmdb_id = ?, title = ?, year = ?, imdb_id = COALESCE(?, imdb_id), tvdb_id = COALESCE(?, tvdb_id),
              poster_url = COALESCE(?, poster_url), backdrop_url = COALESCE(?, backdrop_url),
              overview = COALESCE(?, overview),
              confidence = ?, identification_json = ?,
@@ -100,6 +121,7 @@ function applyMovie(
          WHERE id = ?`,
       )
       .run(
+        identity.tmdbId,
         identity.title,
         identity.year,
         identity.imdbId ?? null,

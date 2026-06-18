@@ -377,6 +377,33 @@ export async function apiSettingsWipeDb(scope: 'library' | 'all'): Promise<WipeD
   return (await r.json()) as WipeDbResult;
 }
 
+/** 0.1.14 — a tombstoned (hidden) library item whose file is still on disk, so
+ *  it can be recovered. Surfaced in Settings → Library health. */
+export interface HiddenItem {
+  id: number;
+  type: 'movie' | 'series';
+  title: string | null;
+  year: number | null;
+  posterUrl: string | null;
+  path: string;
+  deletedAt: number | null;
+}
+
+/** List hidden-but-recoverable items (tombstoned, file still present). */
+export const apiLibraryHidden = (): Promise<HiddenItem[]> =>
+  api<{ items: HiddenItem[] }>('/api/library/hidden').then((r) => r.items);
+
+/** Restore a hidden item: re-parent its on-disk file and clear the tombstone.
+ *  Keeps existing metadata (no re-identify). 409 if a scan is in progress. */
+export async function apiLibraryRestore(
+  id: number,
+): Promise<{ ok: true; restored: boolean; id: number }> {
+  const r = await fetch(`/api/library/hidden/${id}/restore`, { method: 'POST' });
+  if (r.status === 409) throw new Error('A scan is in progress — try again when it finishes.');
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as { ok: true; restored: boolean; id: number };
+}
+
 export const subsUrl = (relPath: string): string =>
   `/api/subs/${encodeURIComponent(relPath)}`;
 

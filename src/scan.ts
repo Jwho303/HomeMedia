@@ -93,6 +93,11 @@ export interface ScanResult {
   disappeared: number;
   /** 0.1.10 — paths that flipped from deleted_at != NULL → NULL on this run. */
   resurrected: number;
+  /** 0.1.14 — movie files re-pointed to their correct owner item by the
+   *  mis-parent heal (see `healMisparentedFiles`). Each one typically revives
+   *  a movie that had silently vanished from the home grid. Optional so test
+   *  stubs and older callers building a ScanResult literal still typecheck. */
+  reparented?: number;
   /** 0.1.10 — the scan_runs row id, useful for diagnostics + the SSE done event. */
   runId: number;
 }
@@ -245,6 +250,65 @@ function bumpScannedAtForFiles(db: DbHandle, files: FileEntry[], startedAt: numb
 export interface ReconcileCounts {
   disappeared: number;
   resurrected: number;
+  /** 0.1.14 — media_files rows re-pointed from a wrong owner back to the
+   *  movie item whose own `path` matches the file. See `healMisparentedFiles`. */
+  reparented: number;
+}
+
+/**
+ * 0.1.14 — repair movie files that got attached to the wrong `media_items`
+ * row.
+ *
+ * The bug this heals: `applyMovie` (identify/apply.ts) merges a movie by TMDB
+ * id and `upsertMediaFile`s the file's path onto the merge target. If the
+ * resolver lands on a *different* movie item than the one whose own `path`
+ * equals the file, the `media_files.item_id` is rewritten to the wrong item.
+ * The original item is left with zero live children and the parent-aliveness
+ * recompute below tombstones it — the movie silently vanishes from the home
+ * grid even though the file is fine on disk. (Real-world repro: the three
+ * Lord of the Rings films cross-wiring during a manual re-identify.)
+ *
+ * The heal is deliberately conservative — it only acts on the unambiguous
+ * case where a movie `media_items` row's own `path` is *identical* to a live
+ * `media_files` path that currently points at a different item. That equality
+ * is the same key the original (correct) `media_files` row used, so flipping
+ * `item_id` back is a metadata-only restore: no TMDB calls, no guessing. The
+ * caller runs this BEFORE the parent-aliveness recompute so the revived owner
+ * is seen to have a live child and stays alive.
+ *
+ * Returns the number of `media_files` rows re-pointed.
+ */
+export function healMisparentedFiles(db: DbHandle): number {
+  // Candidates: live media_files whose path equals a *movie* media_items.path
+  // belonging to a different item than the one the file currently points at.
+  const rows = db.raw
+    .prepare<[], { file_id: number; current_item: number; correct_item: number }>(
+      `SELECT mf.id        AS file_id,
+              mf.item_id   AS current_item,
+              mi.id        AS correct_item
+       FROM media_files mf
+       JOIN media_items mi ON mi.path = mf.path AND mi.type = 'movie'
+       WHERE mf.deleted_at IS NULL
+         AND mf.item_id <> mi.id`,
+    )
+    .all();
+  if (rows.length === 0) return 0;
+  const repoint = db.raw.prepare<[number, number]>(
+    `UPDATE media_files SET item_id = ? WHERE id = ?`,
+  );
+  const revive = db.raw.prepare<[number]>(
+    `UPDATE media_items SET deleted_at = NULL WHERE id = ?`,
+  );
+  let reparented = 0;
+  for (const r of rows) {
+    repoint.run(r.correct_item, r.file_id);
+    // Clear any tombstone on the true owner now that it has a live child
+    // again. (The parent recompute would also clear it, but doing it here
+    // keeps the two steps independent and the count meaningful.)
+    revive.run(r.correct_item);
+    reparented++;
+  }
+  return reparented;
 }
 
 /**
@@ -314,6 +378,11 @@ export function reconcile(
     }
   }
 
+  // 0.1.14 — repair mis-parented movie files BEFORE the parent recompute, so
+  // a file flipped back to its true owner makes that owner look alive (one
+  // live child) and the recompute leaves it alive instead of (re)tombstoning.
+  const reparented = healMisparentedFiles(db);
+
   // Parent recompute. A series row is alive iff at least one alive episode
   // exists; a movie row is alive iff at least one alive media_files row
   // exists. Set deleted_at where no alive child; clear where an alive child
@@ -368,7 +437,11 @@ export function reconcile(
     )
     .run();
 
-  return { disappeared: disappearedPaths.size, resurrected: resurrectedPaths.size };
+  return {
+    disappeared: disappearedPaths.size,
+    resurrected: resurrectedPaths.size,
+    reparented,
+  };
 }
 
 /** Mutable monotonic counter used to drive SSE `file` / `probe` events. The
@@ -529,6 +602,7 @@ export async function scan(opts: ScanOptions = {}, deps: ScanDeps = {}): Promise
     probed: 0,
     disappeared: 0,
     resurrected: 0,
+    reparented: 0,
     runId,
   };
 
@@ -564,6 +638,7 @@ async function runScan(
     const counts = reconcileTx(allFiles);
     result.disappeared = counts.disappeared;
     result.resurrected = counts.resurrected;
+    result.reparented = counts.reparented;
     // Back-compat: `stale` aliases `disappeared` for one release. (D… spec)
     result.stale = counts.disappeared;
   };

@@ -8,6 +8,15 @@ tidy, clickable library you can play from any device on your home Wi-Fi. No
 subscriptions, no uploading anything to the internet — it all stays on your
 own computer.
 
+![Your movie library, organized by genre with cover art, ratings, and a Continue Watching row](screenshots/Movies.png)
+*Your movies, sorted into genre rows with cover art and ratings — pick up where you left off from Continue Watching.*
+
+![Your TV shows, with per-show watch progress](screenshots/Series.png)
+*Your TV shows in the same view, each tile showing how far through you are.*
+
+![A show's season and episode view with thumbnails and resume points](screenshots/Season.png)
+*Open a show to see its seasons and episodes, with thumbnails, a Continue / Up Next highlight, and watched markers.*
+
 ---
 
 ## Getting started (the easy way)

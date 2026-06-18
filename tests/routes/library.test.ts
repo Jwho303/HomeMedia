@@ -309,4 +309,81 @@ describe('library routes', () => {
       await app.close();
     }
   });
+
+  // 0.1.14 — Hidden-items recovery surface.
+  it('GET /api/library/hidden lists tombstoned items whose file is still on disk', async () => {
+    const { getDb } = await import('../../src/db.js');
+    const db = getDb();
+    // Present-on-disk hidden movie.
+    await fs.writeFile(path.join(goodDir, 'Present.mkv'), 'x');
+    const present = db.upsertItem({
+      path: 'Present.mkv', type: 'movie', tmdb_id: 1, title: 'Present', year: 2001,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    db.upsertMediaFile({ item_id: present.id, path: 'Present.mkv', mtime: 1, scanned_at: 1 });
+    // Genuinely-gone hidden movie (no file written).
+    const gone = db.upsertItem({
+      path: 'Gone.mkv', type: 'movie', tmdb_id: 2, title: 'Gone', year: 2002,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    // Tombstone both.
+    db.raw.prepare(`UPDATE media_items SET deleted_at = 100 WHERE id IN (?, ?)`).run(present.id, gone.id);
+
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'GET', url: '/api/library/hidden' });
+      expect(res.statusCode).toBe(200);
+      const items = res.json().items as Array<{ id: number; title: string }>;
+      // Only the on-disk one is recoverable.
+      expect(items.map((i) => i.title)).toEqual(['Present']);
+    } finally {
+      await fs.rm(path.join(goodDir, 'Present.mkv'), { force: true });
+      await app.close();
+    }
+  });
+
+  it('POST /api/library/hidden/:id/restore revives a hidden movie and re-parents its file', async () => {
+    const { getDb } = await import('../../src/db.js');
+    const db = getDb();
+    await fs.writeFile(path.join(goodDir, 'ROTK.mkv'), 'x');
+    const fellowship = db.upsertItem({
+      path: 'Fellowship.mkv', type: 'movie', tmdb_id: 120, title: 'Fellowship', year: 2001,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    const rotk = db.upsertItem({
+      path: 'ROTK.mkv', type: 'movie', tmdb_id: 122, title: 'ROTK', year: 2003,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    // Mis-parent: ROTK's file points at Fellowship; ROTK item tombstoned.
+    db.upsertMediaFile({ item_id: fellowship.id, path: 'ROTK.mkv', mtime: 1, scanned_at: 1 });
+    db.raw.prepare(`UPDATE media_items SET deleted_at = 100 WHERE id = ?`).run(rotk.id);
+
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'POST', url: `/api/library/hidden/${rotk.id}/restore` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.restored).toBe(true);
+      // File re-parented to ROTK, item alive.
+      expect(db.getMediaFileByPath('ROTK.mkv')!.item_id).toBe(rotk.id);
+      expect(db.getByPath('ROTK.mkv')!.deleted_at ?? null).toBeNull();
+    } finally {
+      await fs.rm(path.join(goodDir, 'ROTK.mkv'), { force: true });
+      await app.close();
+    }
+  });
+
+  it('POST /api/library/hidden/:id/restore 404 for unknown id', async () => {
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'POST', url: '/api/library/hidden/9999/restore' });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
 });

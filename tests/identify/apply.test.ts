@@ -63,6 +63,62 @@ describe('applyIdentity', () => {
     expect(ep.episode).toBe(3);
   });
 
+  // 0.1.14 — regression for the LOTR cross-wiring bug. Re-identifying a movie
+  // file whose TMDB id happens to already be carried by a *different* movie
+  // item must NOT re-parent the file onto that other item (which would orphan
+  // — and the scan would then tombstone — the file's own item).
+  it('movie: re-identify never re-parents the file onto a different item sharing the tmdb_id', async () => {
+    // Fellowship at its own path, holding tmdb 120.
+    const fellowship = db.upsertItem({
+      path: 'Fellowship.mkv', type: 'movie', tmdb_id: 120, title: 'Fellowship', year: 2001,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    db.upsertMediaFile({ item_id: fellowship.id, path: 'Fellowship.mkv', mtime: 1, scanned_at: 1 });
+    // ROTK at its own path, but (corrupted) ALSO carrying tmdb 120.
+    const rotk = db.upsertItem({
+      path: 'ROTK.mkv', type: 'movie', tmdb_id: 120, title: 'wrong', year: 2003,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    db.upsertMediaFile({ item_id: rotk.id, path: 'ROTK.mkv', mtime: 1, scanned_at: 1 });
+
+    // Re-identify ROTK's file to its real identity (tmdb 122).
+    await applyIdentity(
+      'ROTK.mkv',
+      { tmdbId: 122, type: 'movie', title: 'The Return of the King', year: 2003 },
+      { confidence: 1, mtime: 1, scannedAt: 2 },
+      { db },
+    );
+
+    // ROTK's file stays on ROTK's item, which now holds the correct tmdb id.
+    const file = db.getMediaFileByPath('ROTK.mkv')!;
+    expect(file.item_id).toBe(rotk.id);
+    const rotkRow = db.getByPath('ROTK.mkv')!;
+    expect(rotkRow.tmdb_id).toBe(122);
+    expect(rotkRow.title).toBe('The Return of the King');
+    // Fellowship's file is untouched.
+    expect(db.getMediaFileByPath('Fellowship.mkv')!.item_id).toBe(fellowship.id);
+  });
+
+  it('movie: a new rip still merges onto the existing item with the same tmdb_id (multi-rip)', async () => {
+    const original = db.upsertItem({
+      path: 'Naussica/RM10.mkv', type: 'movie', tmdb_id: 81, title: 'Nausicaa', year: 1984,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    db.upsertMediaFile({ item_id: original.id, path: 'Naussica/RM10.mkv', mtime: 1, scanned_at: 1 });
+    // A second rip at a new path, same movie. No item owns this path yet → the
+    // tmdb merge must still attach it to the existing item.
+    await applyIdentity(
+      'Naussica/RM14.mkv',
+      { tmdbId: 81, type: 'movie', title: 'Nausicaa', year: 1984 },
+      { confidence: 1, mtime: 1, scannedAt: 2 },
+      { db },
+    );
+    expect(db.getMediaFileByPath('Naussica/RM14.mkv')!.item_id).toBe(original.id);
+    // Still one movie item.
+    const movies = db.raw.prepare(`SELECT id FROM media_items WHERE type='movie'`).all();
+    expect(movies).toHaveLength(1);
+  });
+
   it('reuses existing series row when one already exists for the tmdb_id', async () => {
     const existing = db.upsertItem({
       path: 'Show', type: 'series', tmdb_id: 200, title: 'Show', year: 2010,

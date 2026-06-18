@@ -187,5 +187,78 @@ describe('reconcile()', () => {
     const counts = reconcile(db, [{ relPosix: 'A.mkv', mtime: 1 }], RUN_AT + 1);
     expect(counts.disappeared).toBe(0);
     expect(counts.resurrected).toBe(0);
+    expect(counts.reparented).toBe(0);
+  });
+
+  // 0.1.14 — mis-parent heal. Reproduces the real LOTR bug: a movie's file
+  // got its media_files.item_id rewritten to a *different* movie item, leaving
+  // the true owner childless (and thus tombstoned + hidden from home).
+  it('heals a movie file re-parented onto the wrong item, reviving the true owner', () => {
+    const fellowship = seedMovie(db, 'Fellowship.mkv');
+    const rotkId = seedMovie(db, 'ROTK.mkv');
+    // Corrupt the DB the way applyMovie did: point ROTK's file at Fellowship,
+    // and tombstone the now-childless ROTK item.
+    db.raw.prepare(`UPDATE media_files SET item_id = ? WHERE path = 'ROTK.mkv'`).run(fellowship);
+    db.raw.prepare(`UPDATE media_items SET deleted_at = 100 WHERE id = ?`).run(rotkId);
+
+    // Both files are still on disk.
+    const counts = reconcile(
+      db,
+      [
+        { relPosix: 'Fellowship.mkv', mtime: 1 },
+        { relPosix: 'ROTK.mkv', mtime: 1 },
+      ],
+      RUN_AT,
+    );
+
+    expect(counts.reparented).toBe(1);
+    // ROTK's file points back at the ROTK item.
+    const file = db.raw
+      .prepare(`SELECT item_id FROM media_files WHERE path = 'ROTK.mkv'`)
+      .get() as { item_id: number };
+    expect(file.item_id).toBe(rotkId);
+    // ROTK item is alive again → visible on home.
+    expect(deletedAt(db, 'media_items', 'ROTK.mkv')).toBeNull();
+    // Fellowship is untouched and still alive.
+    expect(deletedAt(db, 'media_items', 'Fellowship.mkv')).toBeNull();
+  });
+
+  it('mis-parent heal is a no-op when every file already points at its own item', () => {
+    seedMovie(db, 'A.mkv');
+    seedMovie(db, 'B.mkv');
+    const counts = reconcile(
+      db,
+      [
+        { relPosix: 'A.mkv', mtime: 1 },
+        { relPosix: 'B.mkv', mtime: 1 },
+      ],
+      RUN_AT,
+    );
+    expect(counts.reparented).toBe(0);
+  });
+
+  it('mis-parent heal ignores multi-rip files (path never equals a movie item path)', () => {
+    // Foldered multi-rip: the item path is the folder, the files live under it.
+    const item = db.upsertItem({
+      path: 'Naussica',
+      type: 'movie',
+      tmdb_id: 81,
+      title: 'Naussica',
+      year: 1984,
+      poster_url: null,
+      backdrop_url: null,
+      overview: null,
+      mtime: 0,
+      scanned_at: 1,
+    });
+    db.upsertMediaFile({ item_id: item.id, path: 'Naussica/RM10.mkv', mtime: 1, scanned_at: 1 });
+    const counts = reconcile(db, [{ relPosix: 'Naussica/RM10.mkv', mtime: 1 }], RUN_AT);
+    // No movie item has path 'Naussica/RM10.mkv', so the heal can't (and must
+    // not) touch it.
+    expect(counts.reparented).toBe(0);
+    const file = db.raw
+      .prepare(`SELECT item_id FROM media_files WHERE path = 'Naussica/RM10.mkv'`)
+      .get() as { item_id: number };
+    expect(file.item_id).toBe(item.id);
   });
 });
