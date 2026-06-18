@@ -12,13 +12,30 @@
 $ErrorActionPreference = 'Stop'
 
 # Pinned versions. Bump these to update the portable runtimes.
-$NodeVersion = '20.18.1'                      # Node LTS
+$NodeVersion = '22.23.0'                      # Node 22 LTS (undici 8 needs >=22.19)
+$MinNodeMajor = 22                            # minimum acceptable system Node
+$MinNodeMinor = 19
 $NodeArch    = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
 $RepoRoot    = Split-Path -Parent $PSScriptRoot
 $RuntimeDir  = Join-Path $RepoRoot '.runtime'
 $PathAdds    = @()
 
 function Have($cmd) { return [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+# Is the Node currently on PATH new enough? A too-old Node (e.g. 20.x) will
+# crash at startup because undici 8 uses APIs added in Node 22.19, so we treat
+# an outdated system Node the same as a missing one and fetch the portable copy.
+function NodeIsRecentEnough {
+  if (-not (Have 'node')) { return $false }
+  try { $v = (& node --version) -replace '^v','' } catch { return $false }
+  $parts = $v.Split('.')
+  if ($parts.Count -lt 2) { return $false }
+  $maj = [int]$parts[0]; $min = [int]$parts[1]
+  if ($maj -gt $MinNodeMajor) { return $true }
+  if ($maj -eq $MinNodeMajor -and $min -ge $MinNodeMinor) { return $true }
+  Write-Host "[setup] Found Node v$v, but HomeMedia needs v$MinNodeMajor.$MinNodeMinor or newer."
+  return $false
+}
 
 function Download($url, $dest) {
   Write-Host "  downloading $url"
@@ -31,7 +48,8 @@ function Download($url, $dest) {
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 
 # ---------------- Node.js ----------------
-if (-not (Have 'node')) {
+# Fetch a portable Node when none is on PATH OR the system Node is too old.
+if (-not (NodeIsRecentEnough)) {
   $nodeName = "node-v$NodeVersion-win-$NodeArch"
   $nodeDir  = Join-Path $RuntimeDir $nodeName
   if (-not (Test-Path (Join-Path $nodeDir 'node.exe'))) {

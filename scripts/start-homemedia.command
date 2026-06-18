@@ -17,7 +17,24 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 RUNTIME_DIR="$PWD/.runtime"
-NODE_VERSION="20.18.1"
+NODE_VERSION="22.23.0"      # Node 22 LTS (undici 8 needs >=22.19)
+MIN_NODE_MAJOR=22          # minimum acceptable system Node
+MIN_NODE_MINOR=19
+
+# True when the Node currently on PATH is new enough. A too-old Node (e.g. 20.x)
+# crashes at startup because undici 8 uses APIs added in Node 22.19, so we treat
+# an outdated system Node the same as a missing one and fetch the portable copy.
+node_is_recent_enough() {
+  command -v node >/dev/null 2>&1 || return 1
+  local v maj min
+  v="$(node --version 2>/dev/null)"; v="${v#v}"
+  maj="${v%%.*}"; min="${v#*.}"; min="${min%%.*}"
+  [ -n "$maj" ] && [ -n "$min" ] || return 1
+  if [ "$maj" -gt "$MIN_NODE_MAJOR" ]; then return 0; fi
+  if [ "$maj" -eq "$MIN_NODE_MAJOR" ] && [ "$min" -ge "$MIN_NODE_MINOR" ]; then return 0; fi
+  echo "[setup] Found Node v$v, but HomeMedia needs v$MIN_NODE_MAJOR.$MIN_NODE_MINOR or newer."
+  return 1
+}
 
 echo
 echo "============================================"
@@ -37,7 +54,8 @@ esac
 echo "Checking requirements..."
 
 # ---------------- Node.js ----------------
-if ! command -v node >/dev/null 2>&1; then
+# Fetch a portable Node when none is on PATH OR the system Node is too old.
+if ! node_is_recent_enough; then
   NODE_NAME="node-v${NODE_VERSION}-darwin-${NODE_ARCH}"
   NODE_DIR="$RUNTIME_DIR/$NODE_NAME"
   if [ ! -x "$NODE_DIR/bin/node" ]; then
@@ -122,3 +140,18 @@ echo
 # --- Start the server, reachable from other devices on the network ---
 export HOST=0.0.0.0
 npm run start
+STATUS=$?
+
+# Keep the window open after the server stops so any error above stays
+# readable instead of the Terminal window closing on its own.
+echo
+echo "============================================"
+if [ "$STATUS" -ne 0 ]; then
+  echo "   [!] HomeMedia stopped unexpectedly."
+  echo "       The error is shown above. Please copy"
+  echo "       it when asking for help."
+else
+  echo "   HomeMedia has stopped."
+fi
+echo "============================================"
+read -r -p "Press Return to close."

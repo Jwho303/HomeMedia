@@ -81,5 +81,21 @@ echo.
 REM --- Start the server, reachable from other devices on the network ---
 set HOST=0.0.0.0
 call npm run start
+set "EXITCODE=%ERRORLEVEL%"
+
+REM --- Always keep the window open after the server stops, so the user can
+REM     read what happened instead of the window vanishing on its own. The
+REM     message depends on whether it stopped cleanly or because of an error. ---
+echo.
+echo ============================================
+if not "%EXITCODE%"=="0" (
+  echo    [!] HomeMedia stopped unexpectedly.
+  echo        The error is shown above. Please copy
+  echo        it when asking for help.
+) else (
+  echo    HomeMedia has stopped.
+)
+echo ============================================
+pause
 
 endlocal
