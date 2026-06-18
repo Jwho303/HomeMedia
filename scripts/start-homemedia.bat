@@ -10,6 +10,11 @@ REM ============================================================
 
 setlocal enabledelayedexpansion
 
+REM --- Disable console "QuickEdit" mode. Otherwise a single accidental click
+REM     inside the window enters text-selection mode and FREEZES the running
+REM     process until a key is pressed, which looks exactly like a hang. ---
+reg add "HKCU\Console" /v QuickEdit /t REG_DWORD /d 0 /f >nul 2>&1
+
 REM cd to repo root (parent of this script's folder)
 cd /d "%~dp0\.."
 
@@ -20,7 +25,10 @@ echo ============================================
 echo.
 
 REM --- Make sure Node + ffmpeg are available (fetch if missing) ---
-echo Checking requirements...
+echo [Step 1 of 4] Checking requirements (Node.js + ffmpeg)
+echo    First run downloads about 100 MB and may take a couple of minutes.
+echo    Tip: do NOT click inside this window while it works - that can pause it.
+echo.
 for /f "usebackq tokens=1,* delims==" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"`) do (
   if "%%a"=="PATHADD" set "PATH=%%b;!PATH!"
 )
@@ -30,10 +38,13 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+echo    [Step 1 of 4] done.
+echo.
 
 REM --- Install dependencies the first time (node_modules missing) ---
+echo [Step 2 of 4] Installing app components
 if not exist "node_modules" (
-  echo First-time setup: installing components. This can take a few minutes...
+  echo    First-time setup - this can take a few minutes. Please wait...
   echo.
   call npm install
   if errorlevel 1 (
@@ -41,17 +52,22 @@ if not exist "node_modules" (
     pause
     exit /b 1
   )
-  echo.
+) else (
+  echo    Already installed - skipping.
 )
+echo    [Step 2 of 4] done.
+echo.
 
 REM --- Build the app (fast on repeat runs) ---
-echo Preparing the app...
+echo [Step 3 of 4] Preparing the app
 call npm run build
 if errorlevel 1 (
   echo [!] Build failed.
   pause
   exit /b 1
 )
+echo    [Step 3 of 4] done.
+echo.
 
 REM --- Detect this computer's network address ---
 set "LAN_IP="
@@ -62,7 +78,7 @@ if defined LAN_IP set "LAN_IP=%LAN_IP:~1%"
 
 echo.
 echo ============================================
-echo    HomeMedia is starting.
+echo    [Step 4 of 4] HomeMedia is starting.
 echo.
 echo    On THIS computer, open:
 echo        http://localhost:3000

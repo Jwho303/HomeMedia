@@ -51,17 +51,23 @@ case "$(uname -m)" in
   *) NODE_ARCH="x64" ;;
 esac
 
-echo "Checking requirements..."
+echo "[Step 1 of 4] Checking requirements (Node.js + ffmpeg)"
+echo "   First run downloads about 100 MB and may take a couple of minutes."
+echo
 
 # ---------------- Node.js ----------------
 # Fetch a portable Node when none is on PATH OR the system Node is too old.
+echo "   --- Step 1 of 2: Node.js ---"
 if ! node_is_recent_enough; then
   NODE_NAME="node-v${NODE_VERSION}-darwin-${NODE_ARCH}"
   NODE_DIR="$RUNTIME_DIR/$NODE_NAME"
   if [ ! -x "$NODE_DIR/bin/node" ]; then
-    echo "[setup] Node.js not found - fetching a portable copy (one time)..."
-    curl -fSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_NAME}.tar.gz" \
+    echo "   not on this Mac - fetching a portable copy (one time)..."
+    echo "   downloading Node.js ${NODE_VERSION} ..."
+    # -# shows a live progress bar so a slow download doesn't look frozen.
+    curl -fSL -# "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_NAME}.tar.gz" \
       -o "$RUNTIME_DIR/node.tar.gz" \
+      && echo "   extracting..." \
       && tar -xzf "$RUNTIME_DIR/node.tar.gz" -C "$RUNTIME_DIR" \
       && rm -f "$RUNTIME_DIR/node.tar.gz"
     if [ ! -x "$NODE_DIR/bin/node" ]; then
@@ -70,20 +76,29 @@ if ! node_is_recent_enough; then
       read -r -p "Press Return to close."
       exit 1
     fi
+    echo "   Node.js ready."
+  else
+    echo "   using the copy already downloaded in .runtime/."
   fi
   export PATH="$NODE_DIR/bin:$PATH"
+else
+  echo "   already installed - good to go."
 fi
 
 # ---------------- ffmpeg / ffprobe ----------------
+echo
+echo "   --- Step 2 of 2: ffmpeg (for video playback) ---"
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
   FF_DIR="$RUNTIME_DIR/ffmpeg"
   mkdir -p "$FF_DIR"
   if [ ! -x "$FF_DIR/ffmpeg" ] || [ ! -x "$FF_DIR/ffprobe" ]; then
-    echo "[setup] ffmpeg not found - fetching a portable copy (one time)..."
+    echo "   not on this Mac - fetching a portable copy (one time)..."
     # evermeet.cx publishes maintained static Mac builds of ffmpeg/ffprobe.
-    curl -fSL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o "$FF_DIR/ffmpeg.zip" \
+    echo "   downloading ffmpeg ..."
+    curl -fSL -# "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o "$FF_DIR/ffmpeg.zip" \
       && unzip -o -q "$FF_DIR/ffmpeg.zip" -d "$FF_DIR" && rm -f "$FF_DIR/ffmpeg.zip"
-    curl -fSL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o "$FF_DIR/ffprobe.zip" \
+    echo "   downloading ffprobe ..."
+    curl -fSL -# "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o "$FF_DIR/ffprobe.zip" \
       && unzip -o -q "$FF_DIR/ffprobe.zip" -d "$FF_DIR" && rm -f "$FF_DIR/ffprobe.zip"
     chmod +x "$FF_DIR/ffmpeg" "$FF_DIR/ffprobe" 2>/dev/null || true
   fi
@@ -93,35 +108,45 @@ if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; 
     read -r -p "Press Return to close."
     exit 1
   fi
+  echo "   ffmpeg ready."
   export PATH="$FF_DIR:$PATH"
+else
+  echo "   already installed - good to go."
 fi
+echo "   [Step 1 of 4] done."
+echo
 
 # --- Install dependencies the first time (node_modules missing) ---
+echo "[Step 2 of 4] Installing app components"
 if [ ! -d "node_modules" ]; then
-  echo "First-time setup: installing components. This can take a few minutes..."
+  echo "   First-time setup - this can take a few minutes. Please wait..."
   echo
   if ! npm install; then
     echo "[!] Setup failed. Please try running this file again."
     read -r -p "Press Return to close."
     exit 1
   fi
-  echo
+else
+  echo "   Already installed - skipping."
 fi
+echo "   [Step 2 of 4] done."
+echo
 
 # --- Build the app (fast on repeat runs) ---
-echo "Preparing the app..."
+echo "[Step 3 of 4] Preparing the app"
 if ! npm run build; then
   echo "[!] Build failed."
   read -r -p "Press Return to close."
   exit 1
 fi
+echo "   [Step 3 of 4] done."
 
 # --- Detect this computer's network address ---
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
 
 echo
 echo "============================================"
-echo "   HomeMedia is starting."
+echo "   [Step 4 of 4] HomeMedia is starting."
 echo
 echo "   On THIS computer, open:"
 echo "       http://localhost:3000"
