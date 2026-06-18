@@ -117,9 +117,6 @@ The Vite dev server (`:5173`) proxies `/api` to `http://127.0.0.1:3000`, so
   - [`src/cli/`](src/cli/) — `scan` and `review` CLIs.
 - [`web/`](web/) — Lit frontend, built with Vite.
 - [`schema.sql`](schema.sql) — SQLite schema (idempotent; applied on open).
-- [`DEPLOY.md`](DEPLOY.md) — operational runbook: HLS cache, log tags, quiet
-  console, reconnect overlay.
-- [`Brief.md`](Brief.md) — the original design brief and rationale.
 
 ## API surface
 
