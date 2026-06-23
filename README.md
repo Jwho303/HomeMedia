@@ -82,6 +82,45 @@ and you're set.
 > it. On Windows, allow the app through when prompted (or allow inbound TCP
 > port 3000). On Mac, allow incoming connections when asked.
 
+### TVs, game consoles, and older devices
+
+HomeMedia detects what the device can do the moment the page loads and picks
+the right experience automatically:
+
+- **Modern phones, tablets, computers, and current TVs/consoles** get the full
+  app. On a TV or console (Xbox, PS5, modern smart TVs) it switches into a
+  **D-pad mode** you can drive entirely with a remote or controller — arrow
+  keys / D-pad move a focus highlight, the confirm button selects, and a hint
+  bar shows the on-screen button prompts.
+- **Older TVs and consoles** (pre-2016 smart TVs, PS4, etc.) that can't run the
+  modern player are sent to the **Basic Player** — a lightweight page that
+  plays video with the device's built-in player. It keeps the essentials
+  (browse, resume, pick audio track, burned-in subtitles, next episode) and
+  drops the fancy extras the old hardware can't handle.
+
+If the full player won't start on a device, you can switch to the Basic Player
+yourself: there's a **"Switch to Basic Player"** link on the player's error
+screen and in **Settings → Playback**.
+
+#### Steering it by hand (`window.__hm`)
+
+You can't open developer tools on a PlayStation or a 2014 TV, so the detector
+is inspectable and overridable from the address bar and a small `window.__hm`
+console object:
+
+| What | How |
+|------|-----|
+| See what was detected | `window.__hm.diag` |
+| Force the Basic Player  | `window.__hm.force('legacy')`  — or add `?platform=legacy` to the URL |
+| Force the modern player | `window.__hm.force('modern')`  — or `?platform=modern` |
+| Force D-pad input mode  | `window.__hm.setInput('dpad')` — or `?input=dpad` |
+| Preview a console (dpad + glyphs) | `window.__hm.spoof('playstation')` / `'xbox'`, `spoof(null)` to clear — or `?input=dpad&glyph=xbox` |
+| List connected controllers | `window.__hm.gamepads()` |
+| Re-send the device report  | `window.__hm.reportDiag()` |
+
+The `?platform=` / `?input=` URL overrides mean a device with only a remote can
+still be steered by typing the address with the override on the end.
+
 ---
 
 ## Everyday use

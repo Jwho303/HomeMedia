@@ -11,9 +11,21 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     <link rel="stylesheet" href="/src/styles/reset.css" />
+    <!-- 0.2.0 — the boot router is inlined here by the inlineBoot Vite plugin
+         (see vite.config.ts). It runs FIRST on the worst device, detects
+         capabilities, and injects the modern module bundle itself — so the
+         unconditional <script type="module"> that used to live in <body> is
+         gone on purpose. In dev the plugin inlines web/boot.js verbatim and
+         sets window.__hmBootSrc='/src/main.ts'; in build it points at the
+         hashed asset. The marker below is where the plugin injects. -->
+    <!--HM_BOOT-->
   </head>
   <body>
     <app-shell></app-shell>
+    <!-- Vite discovers the app entry from this tag. The inlineBoot plugin
+         strips it from the final HTML (boot.js injects the bundle at runtime
+         after capability detection) and points window.__hmBootSrc at the
+         resolved src. Do not remove — without it Rollup has no entry. -->
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

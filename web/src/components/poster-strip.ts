@@ -75,6 +75,17 @@ export class PosterStrip extends LitElement {
       overflow: hidden;
       border: 1px solid var(--border-strong);
     }
+    /* 0.2.0 — D-pad focus highlight. The focus-nav controller adds .hm-focus to
+     *  the whole card; we light up the poster box (accent border + ring + a
+     *  slight lift) so it reads as "this poster is selected" from across the
+     *  room — distinct from the small kebab hover. */
+    .card.hm-focus { outline: none; }
+    .card.hm-focus .poster {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent), var(--shadow-accent);
+      transform: scale(1.04);
+    }
+    .card.hm-focus .title { color: var(--accent); }
     .card img {
       width: 100%;
       height: 100%;
@@ -373,6 +384,7 @@ export class PosterStrip extends LitElement {
     return html`
       <div
         class=${cls}
+        data-nav="1"
         @click=${(): void => this.onClick(item)}
         title=${item.title}
       >

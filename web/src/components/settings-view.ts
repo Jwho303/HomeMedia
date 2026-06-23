@@ -18,6 +18,7 @@ import {
   type HiddenItem,
 } from '../api.js';
 import { iconBackChevron } from './icons.js';
+import { forceBasicPlayer } from '../nav/basic-player.js';
 
 /** The File System Access directory picker requires a secure context
  *  (https or http://localhost), and only Chromium exposes it. On a LAN IP
@@ -832,10 +833,29 @@ export class SettingsView extends LitElement {
                     : null}
                 </div>
                 ${this.renderAccess()}
+                ${this.renderPlayback()}
                 ${this.renderLibraryHealth()}
                 ${this.renderResetData()}
               </div>
             `}
+    `;
+  }
+
+  /** 0.2.0 (D9) — Playback section. The persistent "Basic Player" escape hatch,
+   *  also reachable from a stalled player's error panel. Switches this device to
+   *  the native-HLS legacy client (?platform=legacy) — for old TVs/consoles or
+   *  when modern playback won't start. */
+  private renderPlayback(): unknown {
+    return html`
+      <div class="section">
+        <h2>Playback</h2>
+        <p>
+          If video won't play on this device (older TV, console, or a stalled
+          player), switch to the Basic Player — a lightweight player that works
+          on more devices, with fewer features.
+        </p>
+        <button @click=${(): void => forceBasicPlayer()}>Switch to Basic Player</button>
+      </div>
     `;
   }
 

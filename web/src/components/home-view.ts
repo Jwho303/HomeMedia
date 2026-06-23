@@ -211,6 +211,18 @@ export class HomeView extends LitElement {
     persistToggle(e.detail);
   }
 
+  /** 0.2.0 — read the boot router's diagnosis for couch-mode UI (bumper tab
+   *  glyphs). Safe when boot.js didn't run (defaults to non-dpad/generic). */
+  private bootDpad(): boolean {
+    const hm = (window as unknown as { __hm?: { diag?: { inputMode?: string } } }).__hm;
+    return hm?.diag?.inputMode === 'dpad';
+  }
+  private bootGlyphPlatform(): string {
+    const hm = (window as unknown as { __hm?: { diag?: { platform?: string } } }).__hm;
+    const p = hm?.diag?.platform;
+    return p === 'xbox' || p === 'playstation' ? p : 'generic';
+  }
+
   private onSort(e: CustomEvent<SortMode>): void {
     this.sortMode = e.detail;
   }
@@ -239,6 +251,8 @@ export class HomeView extends LitElement {
       <home-header
         .toggle=${this.toggle}
         .sortMode=${this.sortMode}
+        .dpad=${this.bootDpad()}
+        .glyphPlatform=${this.bootGlyphPlatform()}
         .online=${this.online}
         .jobActive=${this.scan.active}
         .scanI=${this.scan.i}

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HomeMedia (Basic)</title>
+  <!-- 0.2.0 (Phase 4) — the legacy client. Flat ES5 + native <video src=m3u8>.
+       No MSE, no hls.js, no Lit, no modern CSS (no aspect-ratio / backdrop-
+       filter / custom properties). Built for pre-2016 TVs, PS4, and any
+       device the boot router bucketed as 'legacy'. CSS is inline + cheap so
+       a weak TV CPU renders it instantly. -->
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: #000; color: #fff;
+      font-family: Arial, Helvetica, sans-serif; font-size: 16px;
+    }
+    a { color: #ff2d92; }
+    .topbar {
+      padding: 10px 14px; background: #111; border-bottom: 1px solid #333;
+      font-size: 18px; font-weight: bold;
+    }
+    .topbar .back { float: left; margin-right: 12px; cursor: pointer; color: #ff2d92; }
+    .wrap { padding: 12px; }
+    .section-title { font-size: 18px; margin: 14px 0 8px; }
+    /* Movies/Series tab bar — flat, remote-focusable buttons. The active tab
+       gets the magenta accent + underline; the rest stay muted. */
+    .tabs { margin: 0 0 14px; border-bottom: 1px solid #333; }
+    .tabs .tab {
+      font-size: 17px; padding: 8px 18px; margin: 0 4px -1px 0;
+      background: transparent; color: #aaa; border: none;
+      border-bottom: 3px solid transparent; cursor: pointer;
+    }
+    .tabs .tab:hover { color: #fff; }
+    .tabs .tab.active { color: #fff; border-bottom-color: #ff2d92; }
+    .tabs .tab:focus { outline: 2px solid #ff2d92; outline-offset: 2px; }
+    /* D-pad focus highlight, driven by the focus controller (.nav-focus class).
+       A thick magenta outline so it reads from across the room; works on old
+       TVs that ignore :focus-visible. Avoids box-shadow (cheap to paint). */
+    .nav-focus {
+      outline: 4px solid #ff2d92 !important;
+      outline-offset: 2px;
+      position: relative; z-index: 2;
+    }
+    /* Flat grid — float-based (no flexbox/grid required) so the oldest engines
+       lay it out. Fixed tile width keeps it simple. */
+    .grid:after { content: ""; display: block; clear: both; }
+    .tile {
+      float: left; width: 120px; margin: 0 10px 14px 0; cursor: pointer;
+      text-align: center;
+    }
+    .tile .poster {
+      width: 120px; height: 180px; background: #222;
+      border: 1px solid #333; display: block;
+    }
+    .tile .label {
+      font-size: 13px; margin-top: 4px; overflow: hidden; height: 34px;
+    }
+    /* Episode row: thumbnail (left) + text column. Float-based so old engines
+       lay it out without flexbox. */
+    .row {
+      padding: 10px 14px; border-bottom: 1px solid #222; cursor: pointer;
+    }
+    .row:after { content: ""; display: block; clear: both; }
+    .row:hover { background: #161616; }
+    .row .thumb {
+      float: left; width: 142px; height: 80px; margin-right: 12px;
+      background: #222; border: 1px solid #333; display: block;
+      object-fit: cover;
+    }
+    .row .ep-meta { overflow: hidden; }
+    .row .ep-line { font-size: 15px; }
+    .row .ep-num { color: #ff2d92; font-weight: bold; margin-right: 8px; }
+    .row .resume { color: #888; font-size: 13px; margin-top: 4px; }
+    /* Hero (next/resume) episode — accent tint + a pill so it reads at a
+       glance and D-pad focus lands here on entry. */
+    .row.hero { background: rgba(255, 45, 146, 0.10); }
+    .row.hero .hero-badge {
+      display: inline-block; margin-top: 4px; padding: 2px 8px;
+      background: #ff2d92; color: #fff; font-size: 12px; font-weight: bold;
+      border-radius: 3px;
+    }
+    /* Player */
+    .player-wrap { background: #000; }
+    video { width: 100%; max-height: 80vh; background: #000; display: block; }
+    .controls { padding: 10px 14px; background: #111; }
+    .controls button {
+      font-size: 16px; padding: 8px 14px; margin-right: 8px;
+      background: #222; color: #fff; border: 1px solid #444; cursor: pointer;
+    }
+    .controls .scrubrow { margin-top: 10px; }
+    .controls input[type=range] { width: 70%; vertical-align: middle; }
+    .controls .time { margin-left: 10px; color: #aaa; font-size: 14px; }
+    .seeking { color: #ff2d92; margin-left: 12px; }
+    .picker { margin-top: 10px; }
+    .picker select { font-size: 16px; padding: 6px; background: #222; color: #fff; }
+    .msg { padding: 24px; color: #aaa; }
+    .err { padding: 24px; color: #ff453a; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="back" id="backBtn" data-nav="1" style="display:none">&#8592; Back</span>
+    HomeMedia <span style="color:#888;font-size:13px;">Basic Player</span>
+    <!-- Escape back to the full app for anyone sent here by mistake. The
+         ?platform=modern override pins the modern client past detection. -->
+    <a href="/?platform=modern" style="float:right;font-size:13px;color:#ff2d92;">Use full player &#8594;</a>
+  </div>
+  <div id="app" class="wrap"><div class="msg">Loading&hellip;</div></div>
+
+  <script src="/legacy/protocol.js"></script>
+  <script src="/legacy/app.js"></script>
+</body>
+</html>

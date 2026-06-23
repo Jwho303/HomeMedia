@@ -86,6 +86,75 @@ export const iconInfo = (): TemplateResult => html`${wrap(svg`
   <circle cx="12" cy="8" r="0.6" fill="currentColor"/>
 `)}`;
 
+// 0.2.0 (Layer 2) — controller glyphs for the hint bar. Themed by detected
+// platform: Xbox renders the lettered A/B buttons, PlayStation the cross/circle
+// shapes. Each is a filled circle (the button) + the symbol on top, sized to
+// match the line-height of the hint label next to it.
+const glyphWrap = (inner: TemplateResult, fill: string): TemplateResult => svg`
+  <svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true">
+    <circle cx="12" cy="12" r="10" fill="${fill}"/>
+    ${inner}
+  </svg>
+`;
+
+/** Xbox Ⓐ — green button, white "A". */
+export const iconXboxA = (): TemplateResult => html`${glyphWrap(
+  svg`<text x="12" y="16" text-anchor="middle" font-size="11" font-weight="700" fill="#fff" font-family="Arial, sans-serif">A</text>`,
+  '#107c10',
+)}`;
+/** Xbox Ⓑ — red button, white "B". */
+export const iconXboxB = (): TemplateResult => html`${glyphWrap(
+  svg`<text x="12" y="16" text-anchor="middle" font-size="11" font-weight="700" fill="#fff" font-family="Arial, sans-serif">B</text>`,
+  '#d3222a',
+)}`;
+
+/** PlayStation ✕ — dark button, white cross (the confirm button). */
+export const iconPsCross = (): TemplateResult => html`${glyphWrap(
+  svg`<g stroke="#fff" stroke-width="2" stroke-linecap="round">
+        <line x1="8" y1="8" x2="16" y2="16"/>
+        <line x1="16" y1="8" x2="8" y2="16"/>
+      </g>`,
+  '#2a2a33',
+)}`;
+/** PlayStation ○ — dark button, white circle (the back button). */
+export const iconPsCircle = (): TemplateResult => html`${glyphWrap(
+  svg`<circle cx="12" cy="12" r="4.5" fill="none" stroke="#fff" stroke-width="2"/>`,
+  '#2a2a33',
+)}`;
+
+// 0.2.0 — shoulder-button (bumper) glyphs for tab switching. A rounded pill
+// with the platform's bumper label: LB/RB on Xbox, L1/R1 on PlayStation, and a
+// neutral L/R elsewhere. Wider viewBox (the label is two chars).
+const bumperWrap = (label: string): TemplateResult => svg`
+  <svg viewBox="0 0 34 20" width="100%" height="100%" aria-hidden="true">
+    <rect x="1" y="3" width="32" height="14" rx="7" fill="#2a2a33" stroke="#666" stroke-width="1"/>
+    <text x="17" y="14" text-anchor="middle" font-size="10" font-weight="700"
+          fill="#fff" font-family="Arial, sans-serif">${label}</text>
+  </svg>
+`;
+
+/** Left bumper, themed by platform: LB (xbox) / L1 (playstation) / L (generic). */
+export const iconBumperLeft = (platform: string): TemplateResult => {
+  const label = platform === 'playstation' ? 'L1' : platform === 'xbox' ? 'LB' : 'L';
+  return html`${bumperWrap(label)}`;
+};
+/** Right bumper, themed by platform: RB (xbox) / R1 (playstation) / R (generic). */
+export const iconBumperRight = (platform: string): TemplateResult => {
+  const label = platform === 'playstation' ? 'R1' : platform === 'xbox' ? 'RB' : 'R';
+  return html`${bumperWrap(label)}`;
+};
+
+/** Xbox Ⓨ — the "more options" face button (yellow, white "Y"). */
+export const iconXboxY = (): TemplateResult => html`${glyphWrap(
+  svg`<text x="12" y="16" text-anchor="middle" font-size="11" font-weight="700" fill="#fff" font-family="Arial, sans-serif">Y</text>`,
+  '#cc9b00',
+)}`;
+/** PlayStation △ — the "more options" face button (dark button, white triangle). */
+export const iconPsTriangle = (): TemplateResult => html`${glyphWrap(
+  svg`<polygon points="12,7 16.5,15 7.5,15" fill="none" stroke="#3ed8c5" stroke-width="2" stroke-linejoin="round"/>`,
+  '#2a2a33',
+)}`;
+
 export const iconBug = (): TemplateResult => html`${wrap(svg`
   <path d="M9 6V4a3 3 0 0 1 6 0v2"/>
   <rect x="6" y="6" width="12" height="13" rx="6"/>

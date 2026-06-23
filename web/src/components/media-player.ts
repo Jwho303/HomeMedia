@@ -29,6 +29,7 @@ import type {
 } from '../types.js';
 import { goBack, homeHref, navigate, playHref, seriesHref } from '../router.js';
 import { getConnectionState } from '../connection-store.js';
+import { forceBasicPlayer } from '../nav/basic-player.js';
 import {
   cacheLibrary,
   cacheSeriesDetail,
@@ -823,6 +824,21 @@ export class MediaPlayer extends LitElement {
       outline: none;
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), var(--shadow-accent);
     }
+    /* 0.2.0 (D9) — low-key "Basic Player" escape hatch under the Retry button. */
+    .error-panel .error-basic {
+      position: absolute;
+      left: 50%;
+      bottom: 3%;
+      transform: translateX(-50%);
+      background: transparent;
+      color: var(--on-scrim-secondary);
+      border: none;
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      text-decoration: underline;
+    }
+    .error-panel .error-basic:hover { color: var(--on-scrim); }
     /* Top-left back button overlay, matches the in-player .back-btn so the
      *  panel still feels like part of the player surface. */
     .error-panel .error-back {
@@ -3026,6 +3042,13 @@ export class MediaPlayer extends LitElement {
         >${iconBackChevron()}</button>
         <button class="error-retry" @click=${(): void => this.retryPlayback()}>
           Retry
+        </button>
+        <!-- 0.2.0 (D9) — escape hatch. A stalled modern player on a TV is
+             unrecoverable without devtools; this one action drops to the
+             native-HLS legacy client. Detection is wrong ~5% of the time, so
+             this turns a dead end into a minor downgrade. -->
+        <button class="error-basic" @click=${(): void => forceBasicPlayer()}>
+          Trouble playing? Switch to Basic Player
         </button>
       </div>
     `;

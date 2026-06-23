@@ -3,6 +3,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { SortMode } from './home-chunks.js';
 import type { ScanPhase } from '../scan-progress-store.js';
 import { navigate } from '../router.js';
+import { iconBumperLeft, iconBumperRight } from './icons.js';
 
 export type LibraryToggle = 'movies' | 'series';
 
@@ -87,6 +88,19 @@ export class HomeHeader extends LitElement {
       background: var(--surface-pressed);
       color: var(--text-primary);
       font-weight: 600;
+    }
+    /* 0.2.0 — inline bumper glyph on the tabs (dpad mode). Sits beside the
+     *  label so it reads "LB Movies" / "Series RB", like a console app. */
+    .toggle button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .bumper-glyph {
+      display: inline-block;
+      width: 26px;
+      height: 16px;
+      flex: 0 0 auto;
     }
 
     .sort {
@@ -207,6 +221,12 @@ export class HomeHeader extends LitElement {
   @property({ type: Number }) scanN = 0;
   @property({ type: String }) scanCurrentFile: string | null = null;
   @property({ type: String }) scanPhase: ScanPhase = null;
+  /** 0.2.0 — couch mode. When in dpad input, the Movies/Series tabs show
+   *  shoulder-button (bumper) glyphs and the bumpers switch tabs (the D-pad is
+   *  busy moving the grid selection). `glyphPlatform` themes the bumper labels
+   *  (LB/RB vs L1/R1). */
+  @property({ type: Boolean }) dpad = false;
+  @property({ type: String }) glyphPlatform = 'generic';
 
   @state() private sortOpen = false;
   @state() private gearOpen = false;
@@ -225,14 +245,38 @@ export class HomeHeader extends LitElement {
     input?.focus();
   };
 
+  /** 0.2.0 — bumper → tab switch. The D-pad moves the grid selection, so tabs
+   *  need a different button: the shoulder bumpers. On Xbox Edge and the PS5
+   *  browser the bumpers arrive as keyboard events; we accept the common
+   *  codes (LB/L1 ≈ '[' / BracketLeft / PageUp, RB/R1 ≈ ']' / BracketRight /
+   *  PageDown). LB → Movies, RB → Series. Only active in dpad mode, and never
+   *  while typing in the search box. */
+  private bumperListener = (e: KeyboardEvent): void => {
+    if (!this.dpad || e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    const tag = target?.tagName?.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return;
+
+    const k = e.key;
+    const code = e.code;
+    const isLeft = k === '[' || code === 'BracketLeft' || k === 'PageUp';
+    const isRight = k === ']' || code === 'BracketRight' || k === 'PageDown';
+    if (!isLeft && !isRight) return;
+
+    e.preventDefault();
+    this.emitToggle(isLeft ? 'movies' : 'series');
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     document.addEventListener('keydown', this.slashListener);
+    document.addEventListener('keydown', this.bumperListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     document.removeEventListener('keydown', this.slashListener);
+    document.removeEventListener('keydown', this.bumperListener);
   }
 
   private static SORT_OPTIONS: Array<{ key: SortMode; label: string }> = [
@@ -244,6 +288,14 @@ export class HomeHeader extends LitElement {
 
   private emitToggle(value: LibraryToggle): void {
     this.dispatchEvent(new CustomEvent('toggle-change', { detail: value, bubbles: true, composed: true }));
+  }
+
+  /** The bumper label for a side, themed by platform — also the title tooltip
+   *  and the test hook (the SVG <text> doesn't serialize in happy-dom). */
+  private bumperLabel(side: 'left' | 'right'): string {
+    if (this.glyphPlatform === 'playstation') return side === 'left' ? 'L1' : 'R1';
+    if (this.glyphPlatform === 'xbox') return side === 'left' ? 'LB' : 'RB';
+    return side === 'left' ? 'L' : 'R';
   }
 
   private emitSort(value: SortMode): void {
@@ -327,11 +379,25 @@ export class HomeHeader extends LitElement {
           <button
             class=${this.toggle === 'movies' ? 'active' : ''}
             @click=${(): void => this.emitToggle('movies')}
-          >Movies</button>
+          >${this.dpad
+            ? html`<span
+                class="bumper-glyph"
+                data-bumper="left"
+                title=${this.bumperLabel('left')}
+                >${iconBumperLeft(this.glyphPlatform)}</span
+              >`
+            : null}Movies</button>
           <button
             class=${this.toggle === 'series' ? 'active' : ''}
             @click=${(): void => this.emitToggle('series')}
-          >Series</button>
+          >Series${this.dpad
+            ? html`<span
+                class="bumper-glyph"
+                data-bumper="right"
+                title=${this.bumperLabel('right')}
+                >${iconBumperRight(this.glyphPlatform)}</span
+              >`
+            : null}</button>
         </div>
         <div class="sort">
           <button class="sort-button" @click=${(): void => { this.sortOpen = !this.sortOpen; }}>

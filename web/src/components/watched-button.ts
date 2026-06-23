@@ -125,7 +125,15 @@ export class WatchedButton extends LitElement {
     else this.openMenu();
   }
 
-  private openMenu(): void {
+  /** True while the options menu portal is open. Lets the focus controller
+   *  decide whether a Menu keypress opens vs closes. */
+  isMenuOpen(): boolean {
+    return this.menuEl !== null;
+  }
+
+  /** Public so the D-pad focus controller can open this card's menu on the
+   *  Menu/Options button (the kebab isn't an independent focus target). */
+  openMenu(): void {
     if (this.menuEl) return;
     const root = this.renderRoot as ShadowRoot;
     const btn = root.querySelector<HTMLElement>('.btn');
@@ -133,6 +141,8 @@ export class WatchedButton extends LitElement {
 
     const menu = document.createElement('div');
     menu.setAttribute('data-watched-button-menu', '');
+    // Tag so the D-pad focus controller treats this portal as a focus trap.
+    menu.setAttribute('data-nav-menu', '');
     Object.assign(menu.style, {
       position: 'fixed',
       background: 'var(--surface-elevated, #161616)',
@@ -176,6 +186,8 @@ export class WatchedButton extends LitElement {
     const b = document.createElement('button');
     b.textContent = label;
     b.disabled = disabled;
+    // Enabled items are D-pad focus targets while the menu is trapped.
+    if (!disabled) b.setAttribute('data-nav', '1');
     Object.assign(b.style, {
       display: 'block',
       width: '100%',
@@ -216,10 +228,12 @@ export class WatchedButton extends LitElement {
     return d;
   }
 
-  private closeMenu(): void {
+  closeMenu(): void {
     if (!this.menuEl) return;
     this.menuEl.remove();
     this.menuEl = null;
+    // Let the focus controller restore focus to the card behind it.
+    this.dispatchEvent(new CustomEvent('menu-closed', { bubbles: true, composed: true }));
   }
 
   private positionMenu(): void {

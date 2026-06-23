@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { currentRoute, onRouteChange, type Route } from '../router.js';
+import { FocusNavController } from '../nav/focus-nav-controller.js';
 import {
   apiRefresh,
   apiReprobeEpisode,
@@ -25,7 +26,10 @@ import './uncategorized-view.js';
 import './ftue-wizard.js';
 import { FTUE_COMPLETE_EVENT } from './ftue-wizard.js';
 import './manual-identify-modal.js';
+import './glyph-hint-bar.js';
 import type { ManualIdentifyTarget } from './manual-identify-modal.js';
+import type { GlyphHint } from './glyph-hint-bar.js';
+import type { GlyphPlatform } from '../nav/gamepad-detect.js';
 
 /** Custom events bubbled up by views to ask `<app-shell>` to start a job. */
 export interface RefreshTrigger {
@@ -64,6 +68,9 @@ export class AppShell extends LitElement {
   @state() private gate: 'checking' | 'wizard' | 'ready' = 'checking';
   private unsub: (() => void) | null = null;
   private eventSource: EventSource | null = null;
+  /** 0.2.0 (Layer 1) — D-pad focus navigation. Attached only when the boot
+   *  router diagnosed `inputMode==='dpad'`; a no-op on pointer/touch. */
+  private focusNav: FocusNavController | null = null;
   /** Resolves to the final ScanResult for the in-flight job, when callers care. */
   private currentJobResolve: ((value: Record<string, unknown>) => void) | null = null;
   private currentJobReject: ((err: Error) => void) | null = null;
@@ -79,6 +86,12 @@ export class AppShell extends LitElement {
     this.addEventListener('reprobe-item-trigger', this.onReprobeItemTrigger as EventListener);
     this.addEventListener('reprobe-episode-trigger', this.onReprobeEpisodeTrigger as EventListener);
     this.addEventListener('manual-identify-request', this.onManualIdentifyRequest as EventListener);
+    // 0.2.0 (Layer 1) — attach D-pad navigation. The controller reads
+    // window.__hm.diag.inputMode itself and is a no-op unless it is 'dpad', so
+    // pointer/touch builds carry zero behavioural change (D2). Attached on the
+    // document so it sees focusable elements across every view's shadow DOM.
+    this.focusNav = new FocusNavController();
+    this.focusNav.attach();
   }
 
   override disconnectedCallback(): void {
@@ -92,6 +105,8 @@ export class AppShell extends LitElement {
     this.removeEventListener('reprobe-episode-trigger', this.onReprobeEpisodeTrigger as EventListener);
     this.removeEventListener('manual-identify-request', this.onManualIdentifyRequest as EventListener);
     this.closeEventSource();
+    this.focusNav?.detach();
+    this.focusNav = null;
   }
 
   /** 0.1.13 — gate normal routing on setup completeness. A fresh / unbuilt
@@ -210,12 +225,29 @@ export class AppShell extends LitElement {
     }
   }
 
+  /** 0.2.0 — boot-router diagnosis, read off window.__hm. Drives the dpad
+   *  focus nav + the glyph hint bar. Safe when boot.js didn't run (tests):
+   *  defaults to pointer/generic so nothing couch-specific renders. */
+  private bootDiag(): { inputMode: string; platform: GlyphPlatform; forcedGlyph: boolean } {
+    const hm = (window as unknown as {
+      __hm?: { diag?: { inputMode?: string; platform?: string; forcedGlyph?: boolean } };
+    }).__hm;
+    const inputMode = hm?.diag?.inputMode ?? 'pointer';
+    const platform = hm?.diag?.platform;
+    const glyphPlatform: GlyphPlatform =
+      platform === 'xbox' || platform === 'playstation' ? platform : 'generic';
+    // `?glyph=` / __hm.spoof() pins the glyph platform — don't let a live
+    // gamepad override it (the whole point is previewing on a desktop).
+    return { inputMode, platform: glyphPlatform, forcedGlyph: hm?.diag?.forcedGlyph === true };
+  }
+
   override render(): unknown {
     // 0.1.13 — first-run gate. Hold rendering until we know the setup state, so
     // the normal app never flashes for a fresh installer; show the wizard until
     // it signals complete.
     if (this.gate === 'checking') return html`<main></main>`;
     if (this.gate === 'wizard') return html`<ftue-wizard></ftue-wizard>`;
+    const diag = this.bootDiag();
     return html`
       <share-banner></share-banner>
       <main>${this.renderRoute()}</main>
@@ -226,6 +258,34 @@ export class AppShell extends LitElement {
         @cancelled=${(): void => this.onManualIdentifyCancelled()}
       ></manual-identify-modal>
       <reconnect-overlay></reconnect-overlay>
+      ${diag.inputMode === 'dpad'
+        ? this.renderGlyphHintBar(diag.platform, diag.forcedGlyph)
+        : null}
+    `;
+  }
+
+  /** 0.2.0 (Layer 2) — the contextual glyph prompts, pinned to the bottom in
+   *  dpad mode. The hints adapt to the active view; the player owns its own
+   *  on-screen chrome, so we show the browse-level prompts everywhere else. */
+  private renderGlyphHintBar(platform: GlyphPlatform, forced: boolean): unknown {
+    const playing = this.route.name === 'play';
+    const hints: GlyphHint[] = playing
+      ? [
+          { kind: 'confirm', label: 'Play / Pause' },
+          { kind: 'back', label: 'Back' },
+        ]
+      : [
+          { kind: 'confirm', label: 'Select' },
+          { kind: 'menu', label: 'Options' },
+          { kind: 'back', label: 'Back' },
+        ];
+    return html`
+      <glyph-hint-bar
+        style="position:fixed;left:0;right:0;bottom:0;z-index:50;"
+        .platform=${platform}
+        ?forced=${forced}
+        .hints=${hints}
+      ></glyph-hint-bar>
     `;
   }
 

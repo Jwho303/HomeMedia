@@ -120,3 +120,31 @@ input[type='range'] {
   background: transparent;
   cursor: pointer;
 }
+
+/* 0.2.0 (Layer 1) — D-pad focus ring. The FocusNavController adds `.hm-focus`
+ * to the element under focus. This global rule styles host custom-elements
+ * (e.g. <media-tile>) and any light-DOM target; in-shadow elements get the
+ * same ring from their component's own `:focus-visible` block (the controller
+ * also calls el.focus(), so native :focus-visible fires there).
+ *
+ * The ring must NOT rely on :hover (no pointer on a couch) — it is an outline
+ * the controller drives explicitly. */
+.hm-focus {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-accent);
+  /* Make sure the ring sits above neighbouring posters. */
+  position: relative;
+  z-index: 2;
+}
+
+/* Keyboard/remote :focus-visible fallback for native interactives in light
+ * DOM. Pointer/mouse focus stays ring-free (only :focus-visible). */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}

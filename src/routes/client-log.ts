@@ -69,6 +69,21 @@ export async function registerClientLogRoutes(app: FastifyInstance): Promise<voi
       if (typeof obj.relPath === 'string') summary.relPath = obj.relPath;
       if (typeof obj.reason === 'string') summary.reason = obj.reason;
       if (typeof obj.playMode === 'string') summary.playMode = obj.playMode;
+      // 0.2.0 (D8) — boot router diagnosis. `boot.js` POSTs
+      // { tag:'device.boot', device:{ bucket, inputMode, platform, ... } } on
+      // every boot. Hoist the high-signal fields onto the structured line so
+      // `tail`-ing the log shows which devices report which bucket without
+      // re-inflating the JSON. We don't validate the shape — any JSON-shaped
+      // body is accepted (a boot log must never be rejected); we just surface
+      // the fields when present.
+      const device = (typeof obj.device === 'object' && obj.device !== null
+        ? (obj.device as Record<string, unknown>)
+        : null);
+      if (device) {
+        if (typeof device.bucket === 'string') summary.bucket = device.bucket;
+        if (typeof device.inputMode === 'string') summary.inputMode = device.inputMode;
+        if (typeof device.platform === 'string') summary.platform = device.platform;
+      }
       req.log.info(summary, `[client-log] ${tag}`);
       // The full pretty dump still goes to stdout for humans tailing the
       // console — the structured line above is for the log file / scrapers.

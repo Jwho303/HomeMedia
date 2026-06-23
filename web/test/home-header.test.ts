@@ -127,3 +127,58 @@ describe('<home-header> layout (0.1.5.1)', () => {
     expect(el.shadowRoot!.activeElement).toBe(input);
   });
 });
+
+describe('<home-header> couch bumper tabs (0.2.0)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('shows bumper glyphs on the tabs only in dpad mode', async () => {
+    const pointer = await mount({ dpad: false });
+    expect(pointer.shadowRoot!.querySelector('.bumper-glyph')).toBeNull();
+
+    const dpad = await mount({ dpad: true, glyphPlatform: 'xbox' });
+    expect(dpad.shadowRoot!.querySelectorAll('.bumper-glyph').length).toBe(2);
+  });
+
+  it('bumper labels theme by platform (LB/RB for xbox, L1/R1 for playstation)', async () => {
+    const xbox = await mount({ dpad: true, glyphPlatform: 'xbox' });
+    expect(xbox.shadowRoot!.querySelector('[data-bumper="left"]')?.getAttribute('title')).toBe('LB');
+    expect(xbox.shadowRoot!.querySelector('[data-bumper="right"]')?.getAttribute('title')).toBe('RB');
+
+    const ps = await mount({ dpad: true, glyphPlatform: 'playstation' });
+    expect(ps.shadowRoot!.querySelector('[data-bumper="left"]')?.getAttribute('title')).toBe('L1');
+    expect(ps.shadowRoot!.querySelector('[data-bumper="right"]')?.getAttribute('title')).toBe('R1');
+  });
+
+  it('left bumper ("[") switches to Movies, right ("]") to Series — in dpad mode', async () => {
+    const el = await mount({ dpad: true, toggle: 'series' });
+    const events: string[] = [];
+    el.addEventListener('toggle-change', (e) => events.push((e as CustomEvent<string>).detail));
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '[' }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: ']' }));
+    expect(events).toEqual(['movies', 'series']);
+  });
+
+  it('also accepts BracketLeft/Right codes and PageUp/PageDown', async () => {
+    const el = await mount({ dpad: true });
+    const events: string[] = [];
+    el.addEventListener('toggle-change', (e) => events.push((e as CustomEvent<string>).detail));
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'BracketLeft' }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { code: 'BracketRight' }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp' }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }));
+    expect(events).toEqual(['movies', 'series', 'movies', 'series']);
+  });
+
+  it('bumper keys are inert when NOT in dpad mode', async () => {
+    const el = await mount({ dpad: false });
+    const events: string[] = [];
+    el.addEventListener('toggle-change', (e) => events.push((e as CustomEvent<string>).detail));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '[' }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: ']' }));
+    expect(events).toEqual([]);
+  });
+});

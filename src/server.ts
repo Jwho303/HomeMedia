@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,6 +136,52 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     }
     await getHlsSessionManager().shutdownAll();
   });
+
+  // 0.2.0 (Phase 5) — serve the legacy ES5 client. The boot router redirects
+  // capability-bucketed-legacy devices to /legacy/ (a genuine second client:
+  // native <video> HLS, no MSE/hls.js/Lit). Its files live in dist/legacy/
+  // (copied verbatim from web/legacy/ by the copyLegacy Vite plugin) in a
+  // build, or web/legacy/ in a source checkout. We register an explicit index
+  // handler for the bare /legacy and /legacy/ paths; the deeper asset paths
+  // (/legacy/app.js, /legacy/protocol.js) resolve through the @fastify/static
+  // root below. Registered OUTSIDE the configured/share guards on purpose — a
+  // legacy device must reach its client even mid-setup, same as the modern /.
+  // Served straight from the source `web/legacy/` — the files are hand-authored
+  // ES5 needing no build, and serving from here (not WEB_DIST/legacy) avoids a
+  // route collision: the root @fastify/static auto-registers a `/legacy/`
+  // directory-index route for any subdir under WEB_DIST, which would clash with
+  // our explicit handlers below.
+  const legacyRoot = path.resolve(here, '..', 'web', 'legacy');
+  if (existsSync(path.join(legacyRoot, 'index.html'))) {
+    const fs = await import('node:fs');
+    // The legacy bundle is small and flat (index.html + app.js + protocol.js),
+    // so we serve it with a tiny hand-rolled handler instead of a second
+    // @fastify/static instance — registering a second static under /legacy/
+    // collides on the HEAD/GET routes the root static (WEB_DIST) already owns.
+    // Only these three filenames are reachable; anything else 404s.
+    const LEGACY_FILES: Record<string, string> = {
+      'index.html': 'text/html; charset=utf-8',
+      'app.js': 'application/javascript; charset=utf-8',
+      'protocol.js': 'application/javascript; charset=utf-8',
+    };
+    const sendLegacyFile = async (name: string, reply: FastifyReply): Promise<void> => {
+      const type = LEGACY_FILES[name];
+      if (!type) {
+        await reply.code(404).send('Not found');
+        return;
+      }
+      const buf = await fs.promises.readFile(path.join(legacyRoot, name));
+      await reply.type(type).send(buf);
+    };
+    // Bare /legacy → /legacy/ so relative asset paths resolve. 308 keeps GET.
+    app.get('/legacy', async (_req, reply: FastifyReply) => reply.redirect('/legacy/', 308));
+    app.get('/legacy/', async (_req, reply: FastifyReply) => sendLegacyFile('index.html', reply));
+    app.get<{ Params: { '*': string } }>('/legacy/*', async (req, reply: FastifyReply) => {
+      const rest = (req.params as { '*': string })['*'] || 'index.html';
+      // Guard against path traversal — only the known flat filenames are served.
+      await sendLegacyFile(rest, reply);
+    });
+  }
 
   // When the frontend has been built, serve it from /. The /api/* routes are
   // already registered above, so @fastify/static naturally falls through.
