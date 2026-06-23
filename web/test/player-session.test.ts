@@ -105,6 +105,50 @@ function captureEvents(): {
 
 beforeEach(() => {
   // Each test installs its own fetch mock.
+  // Reset the UA/touch markers so an iPad-specific test doesn't leak its
+  // navigator into the hls.js-path tests (which assume a non-Safari desktop).
+  Object.defineProperty(navigator, 'userAgent', {
+    value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36',
+    configurable: true,
+  });
+  Object.defineProperty(navigator, 'maxTouchPoints', { value: 0, configurable: true });
+});
+
+/** Build a session that looks like iPadOS Safari: native HLS available and an
+ *  iPad UA. Used to assert we take the native-HLS path (not hls.js/MSE), which
+ *  is the fix for the iPad "plays a few seconds then technical difficulties"
+ *  bug — hls.js+MSE on iPad is unreliable; Safari's native HLS is not. */
+function makeIPadSession(): { session: PlayerSession; video: HTMLVideoElement } {
+  const video = document.createElement('video');
+  // @ts-expect-error happy-dom missing API — native HLS supported.
+  video.canPlayType = (t: string): string =>
+    t === 'application/vnd.apple.mpegurl' ? 'maybe' : '';
+  Object.defineProperty(navigator, 'userAgent', {
+    // iPadOS 13+ Safari reports as Macintosh; maxTouchPoints>1 marks the iPad.
+    value:
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    configurable: true,
+  });
+  Object.defineProperty(navigator, 'maxTouchPoints', { value: 5, configurable: true });
+  const session = new PlayerSession({ videoEl: video, events: captureEvents(), playerId: 'ipad-id' });
+  return { session, video };
+}
+
+describe('PlayerSession — iPad native HLS (0.2.0)', () => {
+  it('open() on iPadOS attaches via <video>.src (native HLS), not hls.js', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.endsWith('/open')) return mockJson(BUNDLE);
+      throw new Error(`unexpected fetch ${u}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const { session, video } = makeIPadSession();
+    await session.open({ relPath: 'movie.mkv' });
+    // Native path sets the element src to the playlist URL…
+    expect(video.src).toContain('/api/hls/sess-1/master.m3u8');
+    // …and does NOT spin up an hls.js instance.
+    expect((session as unknown as { hls: unknown }).hls).toBeNull();
+  });
 });
 
 describe('PlayerSession', () => {

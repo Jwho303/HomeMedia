@@ -213,16 +213,23 @@ export class PlayerSession {
         this.currentSessionId = r.sessionId;
         return;
       }
-      // Respawn: reattach hls.js to the new playlist URL, then jump to
-      // (target - encodedWindow.from). After respawn the new playlist
-      // starts at encodedWindow.from, so the local target is computed
-      // from the new window the server returned.
+      // Respawn: reattach to the new playlist URL, then jump to
+      // (target - encodedWindow.from). After respawn the new playlist starts at
+      // encodedWindow.from, so the local target is computed from the new window
+      // the server returned. We set pendingResumeAbs BEFORE attaching so the
+      // native-HLS path can apply the seek on `loadedmetadata` (an early
+      // currentTime set is ignored on Safari); the hls.js path applies it
+      // synchronously below and clears the pending marker.
       this.pendingResumeAbs = absoluteSeconds;
       this.currentSessionId = r.sessionId;
-      await this.attachPlaylist(r.playlistUrl);
-      const local = Math.max(0, absoluteSeconds - r.encodedWindow.from);
-      this.videoEl.currentTime = local;
-      this.pendingResumeAbs = null;
+      const usedNative = await this.attachPlaylist(r.playlistUrl);
+      if (!usedNative) {
+        // hls.js path: set currentTime now. The native path instead applies
+        // pendingResumeAbs on `loadedmetadata` (Safari ignores an early set).
+        const local = Math.max(0, absoluteSeconds - r.encodedWindow.from);
+        this.videoEl.currentTime = local;
+        this.pendingResumeAbs = null;
+      }
       this.setState('playing');
     } catch (err) {
       if (err instanceof PlayerCapacityError) {
@@ -294,7 +301,10 @@ export class PlayerSession {
     this.events.onState(s);
   }
 
-  private async attachPlaylist(playlistUrl: string): Promise<void> {
+  /** Attach the playlist to the <video> element. Returns true when the native
+   *  HLS path was used (so callers know seek/resume is applied on metadata, not
+   *  synchronously). */
+  private async attachPlaylist(playlistUrl: string): Promise<boolean> {
     // Tear down any previous hls.js instance.
     if (this.hls) {
       try {
@@ -305,11 +315,23 @@ export class PlayerSession {
       this.hls = null;
     }
 
-    // hls.js path. Prefer hls.js whenever Media Source Extensions are
-    // available — Chrome's "native" HLS (via the Safari engine) has
-    // very limited seek support; setting v.currentTime out of buffer is
-    // silently ignored. hls.js handles fragment fetching properly.
-    // Fall back to native HLS only on browsers without MSE (iOS Safari).
+    const canNativeHls = this.videoEl.canPlayType('application/vnd.apple.mpegurl') !== '';
+
+    // 0.2.0 — On Apple platforms (iOS + iPadOS Safari) PREFER native HLS over
+    // hls.js. iPadOS 13+ Safari reports MSE/`Hls.isSupported() === true`, but
+    // hls.js feeding MSE on iPad is unreliable — it plays a few seconds then
+    // throws a fatal SourceBuffer/append error (the "technical difficulties"
+    // panel). Safari's native HLS engine plays the same stream cleanly. We rely
+    // on server seek-by-respawn (a fresh playlist from the target) rather than
+    // in-buffer currentTime jumps, so native HLS's weaker seek doesn't bite —
+    // same reason the legacy client uses native HLS happily.
+    if (this.preferNativeHls() && canNativeHls) {
+      this.attachNativeHls(playlistUrl);
+      return true;
+    }
+
+    // hls.js path (desktop Chrome/Firefox/Edge): proper fragment fetching and
+    // accurate in-buffer seeking.
     const mod = (await import(/* @vite-ignore */ 'hls.js')) as unknown as HlsModule;
     const Ctor = mod.default;
     if (Ctor && typeof Ctor.isSupported === 'function' && Ctor.isSupported()) {
@@ -317,16 +339,56 @@ export class PlayerSession {
       inst.attachMedia(this.videoEl);
       inst.loadSource(playlistUrl);
       this.hls = inst;
-      return;
+      return false;
     }
 
-    // No MSE — fall back to native HLS (iOS Safari).
-    if (this.videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-      this.videoEl.src = playlistUrl;
-      return;
+    // No MSE and not preferred-native above — last resort native HLS.
+    if (canNativeHls) {
+      this.attachNativeHls(playlistUrl);
+      return true;
     }
 
     this.events.onError('HLS not supported by this browser');
+    return false;
+  }
+
+  /** True on Apple Safari (iOS/iPadOS, and desktop Safari), where native HLS is
+   *  the first-class path and hls.js+MSE is the fragile one. Detected by UA:
+   *  Safari without Chrome/Chromium/Android markers. iPadOS Safari masquerades
+   *  as desktop ("Macintosh") but exposes touch, so we also treat a
+   *  touch-capable Mac as iPad. */
+  private preferNativeHls(): boolean {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const isIOS = /iPad|iPhone|iPod/.test(ua);
+    // iPadOS 13+ reports as Macintosh; distinguish by touch points.
+    const isIPadOS =
+      /Macintosh/.test(ua) &&
+      typeof navigator.maxTouchPoints === 'number' &&
+      navigator.maxTouchPoints > 1;
+    const isSafari = /Safari/.test(ua) && !/Chrome|Chromium|CriOS|Android|Edg/.test(ua);
+    return (isIOS || isIPadOS) && isSafari;
+  }
+
+  /** Attach a playlist via the browser's native HLS engine (<video>.src). When
+   *  a seek requested a resume position before the element reloaded, apply it
+   *  once metadata is ready (native HLS ignores an early currentTime set). */
+  private attachNativeHls(playlistUrl: string): void {
+    this.videoEl.src = playlistUrl;
+    if (this.pendingResumeAbs !== null) {
+      const target = this.pendingResumeAbs;
+      const onMeta = (): void => {
+        this.videoEl.removeEventListener('loadedmetadata', onMeta);
+        const local = Math.max(0, target - this.encodedWindow.from);
+        try {
+          this.videoEl.currentTime = local;
+        } catch {
+          /* some engines reject an early set; the play head stays at 0 */
+        }
+        this.pendingResumeAbs = null;
+      };
+      this.videoEl.addEventListener('loadedmetadata', onMeta);
+    }
   }
 
   private startHeartbeat(): void {
