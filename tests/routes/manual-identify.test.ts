@@ -388,6 +388,49 @@ describe('manual-identify routes', () => {
     }
   });
 
+  it('POST /episode/:id with an absolute episode number maps across seasons', async () => {
+    const { getDb } = await import('../../src/db.js');
+    const db = getDb();
+    const series = db.upsertItem({
+      path: 'Naruto', type: 'series', tmdb_id: 46260,
+      title: 'Naruto', year: 2002,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1000,
+    });
+    const ep = db.upsertEpisode({
+      series_id: series.id, path: 'Naruto/060.mkv', season: 1, episode: 1,
+      title: null, overview: null, still_url: null, mtime: 1, scanned_at: 1000,
+    });
+    const { setTmdbForTests } = await import('../../src/routes/manual-identify.js');
+    setTmdbForTests(makeFakeTmdb({
+      getMovie: async () => { throw new Error('series only'); },
+      getSeries: async (id) => ({
+        id, name: 'Naruto', first_air_date: '2002-01-01', overview: '',
+        seasons: [
+          { season_number: 0, episode_count: 5 },
+          { season_number: 1, episode_count: 57 },
+          { season_number: 2, episode_count: 43 },
+        ],
+      }),
+    }));
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/manual-identify/episode/${ep.id}`,
+        headers: { 'Content-Type': 'application/json' },
+        payload: { tmdbId: 46260, type: 'series', seInput: '60' },
+      });
+      expect(res.statusCode).toBe(200);
+      const updated = db.getEpisodeByPath('Naruto/060.mkv')!;
+      // ep 60 = season 1 (57) + 3 → season 2, episode 3.
+      expect(updated.season).toBe(2);
+      expect(updated.episode).toBe(3);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('POST /episode/:id with bad seInput returns 400', async () => {
     const { getDb } = await import('../../src/db.js');
     const db = getDb();
@@ -443,6 +486,71 @@ describe('manual-identify routes', () => {
       expect(res.json()).toEqual({ error: 'scan_in_progress' });
     } finally {
       release?.();
+      await app.close();
+    }
+  });
+
+  it('POST /item/:id/eject removes a misclassified movie and returns its files to needs_review', async () => {
+    const { getDb } = await import('../../src/db.js');
+    const db = getDb();
+    // Simulate the "Theodora" corruption: two loose episode files gated as one movie.
+    const movie = db.upsertItem({
+      path: 'Vampire S03E01.mkv', type: 'movie', tmdb_id: 323411, title: 'Theodora', year: 1996,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1000,
+    });
+    db.upsertMediaFile({ item_id: movie.id, path: 'Vampire S03E01.mkv', mtime: 1, scanned_at: 1000 });
+    db.upsertMediaFile({ item_id: movie.id, path: 'Vampire S03E02.mkv', mtime: 1, scanned_at: 1000 });
+    db.setManualOverride({ path: 'Vampire S03E01.mkv', tmdb_id: 323411, type: 'movie', reason: 'tmdb-link', decided_at: 1 });
+    db.setManualOverride({ path: 'Vampire S03E02.mkv', tmdb_id: 323411, type: 'movie', reason: 'tmdb-link', decided_at: 1 });
+
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'POST', url: `/api/manual-identify/item/${movie.id}/eject` });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, ejected: 2 });
+
+      // Movie item + its media_files are gone.
+      expect(db.raw.prepare('SELECT id FROM media_items WHERE id = ?').get(movie.id)).toBeUndefined();
+      expect(db.getMediaFileByPath('Vampire S03E01.mkv')).toBeUndefined();
+
+      // Both files are back in needs_review with their movie override cleared.
+      expect(db.getReviewItem('Vampire S03E01.mkv')!.reason).toBe('ejected');
+      expect(db.getReviewItem('Vampire S03E02.mkv')).toBeDefined();
+      expect(db.getManualOverride('Vampire S03E01.mkv')).toBeUndefined();
+      expect(db.getManualOverride('Vampire S03E02.mkv')).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('POST /item/:id/eject returns 409 when a scan is in flight', async () => {
+    const { getDb } = await import('../../src/db.js');
+    const db = getDb();
+    const movie = db.upsertItem({
+      path: 'm.mkv', type: 'movie', tmdb_id: 1, title: 'X', year: 2020,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1000,
+    });
+    const { tryAcquire } = await import('../../src/scan-lock.js');
+    const release = tryAcquire();
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'POST', url: `/api/manual-identify/item/${movie.id}/eject` });
+      expect(res.statusCode).toBe(409);
+    } finally {
+      release?.();
+      await app.close();
+    }
+  });
+
+  it('POST /item/:id/eject returns 404 for an unknown id', async () => {
+    const { buildServer } = await import('../../src/server.js');
+    const app = await buildServer();
+    try {
+      const res = await app.inject({ method: 'POST', url: '/api/manual-identify/item/999999/eject' });
+      expect(res.statusCode).toBe(404);
+    } finally {
       await app.close();
     }
   });

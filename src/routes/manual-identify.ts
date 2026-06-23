@@ -7,6 +7,7 @@ import {
   applyChoice,
   resolveAction,
   parseSeInput,
+  absoluteToSe,
   type ReviewAction,
 } from '../cli/review-core.js';
 import {
@@ -108,18 +109,27 @@ function bodyToAction(
   body: { tmdbId: number; type: 'movie' | 'series' } | { link: string },
 ): ResolvableAction | null {
   if ('link' in body) return parseLink(body.link);
-  return { kind: 'tmdb', id: body.tmdbId };
+  // Pass the picked type through so resolution fetches only that media type
+  // (TMDB ids are per-type; movie-first probing would mis-resolve a series pick).
+  return { kind: 'tmdb', id: body.tmdbId, type: body.type };
 }
 
-/** Resolve season/episode from explicit fields or a parsed `seInput` string. */
+/** Resolve season/episode from explicit fields or a parsed `seInput` string.
+ *  An absolute (series-wide) number — e.g. anime ripped as "220" — can't be
+ *  mapped to (season, episode) until the show's season list is known, so it is
+ *  passed back as `{ absolute }` for the caller to resolve once the series is. */
 function pickSeasonEpisode(input: {
   season?: number | undefined;
   episode?: number | undefined;
   seInput?: string | undefined;
-}): { season?: number; episode?: number } | { error: 'bad_se_input' } {
+}):
+  | { season?: number; episode?: number }
+  | { absolute: number }
+  | { error: 'bad_se_input' } {
   if (input.seInput) {
     const parsed = parseSeInput(input.seInput);
     if (!parsed) return { error: 'bad_se_input' };
+    if ('absolute' in parsed) return { absolute: parsed.absolute };
     return { season: parsed.season, episode: parsed.episode };
   }
   const out: { season?: number; episode?: number } = {};
@@ -351,11 +361,25 @@ export async function registerManualIdentifyRoutes(app: FastifyInstance): Promis
 
         const identity = await enrichArtwork(resolved.identity, t);
 
+        // Resolve an absolute (series-wide) episode number against the picked
+        // show's season list — e.g. anime ripped as "220" maps to whichever
+        // season that count falls in. Needs a TMDB round-trip, so it happens
+        // here, after the series identity is known.
+        let explicitSe: { season?: number; episode?: number };
+        if ('absolute' in seResult) {
+          const series = await t.getSeries(identity.tmdbId);
+          const mapped = absoluteToSe(seResult.absolute, series.seasons);
+          if (!mapped) return reply.code(400).send({ error: 'absolute_out_of_range' });
+          explicitSe = mapped;
+        } else {
+          explicitSe = seResult;
+        }
+
         // Fall back to the episode's existing S/E if neither was supplied. Both
         // the re-parent case (different tmdbId, same S/E) and the S/E-correction
         // case work this way.
-        const season = seResult.season ?? ep.season;
-        const episode = seResult.episode ?? ep.episode;
+        const season = explicitSe.season ?? ep.season;
+        const episode = explicitSe.episode ?? ep.episode;
 
         await applyChoice(
           {
@@ -380,6 +404,68 @@ export async function registerManualIdentifyRoutes(app: FastifyInstance): Promis
         return { episode: updatedEp, item: updatedSeries };
       } catch (err) {
         req.log.warn({ err }, 'manual-identify episode failed');
+        return reply.code(500).send({ error: 'internal' });
+      } finally {
+        release();
+      }
+    });
+
+    // Eject a misclassified item back to "uncategorized". Undoes a gated
+    // identification: removes the media_items row (cascade drops its
+    // media_files / episodes), deletes the pinning manual_overrides, and
+    // re-inserts each underlying file into needs_review so it reappears in the
+    // Uncategorized view for a clean re-identify.
+    //
+    // Motivating case: a loose series episode was wrongly gated as a MOVIE
+    // (a bare TMDB id resolved movie-first to an unrelated film). The movie
+    // override blocks rescans and the movie-only Identify picker can't reach a
+    // series, so this is the only client-facing path back. After eject the
+    // user re-identifies the file as a series episode in the Uncategorized view.
+    s.post('/api/manual-identify/item/:id/eject', async (req, reply) => {
+      const idParsed = idParamSchema.safeParse(req.params);
+      if (!idParsed.success) return reply.code(400).send({ error: 'bad_id' });
+
+      const release = tryAcquire();
+      if (!release) return reply.code(409).send({ error: 'scan_in_progress' });
+      try {
+        const db = getDb();
+        const item = getItemById(db, idParsed.data.id);
+        if (!item) return reply.code(404).send({ error: 'not_found' });
+
+        // The files to return to review: a movie's rips live in media_files
+        // (fall back to the item's own path if none were recorded); a series'
+        // playable files are its episodes.
+        const filePaths =
+          item.type === 'movie'
+            ? (() => {
+                const files = db.getMediaFilesForItem(item.id);
+                return files.length > 0 ? files.map((f) => f.path) : [item.path];
+              })()
+            : db.listEpisodePathsForSeries(item.id);
+
+        const now = Date.now();
+        db.raw.transaction(() => {
+          for (const p of filePaths) {
+            // Drop the pin so a rescan (and the re-identify) isn't overruled.
+            db.deleteManualOverride(p);
+            db.upsertReviewItem({
+              path: p,
+              reason: 'ejected',
+              candidates: '[]',
+              added_at: now,
+              scanned_at: now,
+            });
+          }
+          // Remove the gated item. ON DELETE CASCADE clears its media_files
+          // (movie) / episodes (series). For a series row, also drop its own
+          // path override if present.
+          db.deleteManualOverride(item.path);
+          db.raw.prepare(`DELETE FROM media_items WHERE id = ?`).run(item.id);
+        })();
+
+        return { ok: true, ejected: filePaths.length, paths: filePaths };
+      } catch (err) {
+        req.log.warn({ err }, 'manual-identify eject failed');
         return reply.code(500).send({ error: 'internal' });
       } finally {
         release();

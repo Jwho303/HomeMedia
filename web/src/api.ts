@@ -465,6 +465,90 @@ export const apiManualIdentifyEpisode = (
     },
   );
 
+/** Uncategorized library view — every alive `needs_review` file. A debug /
+ *  catch-all surface for files that aren't gated into Movies or Series. */
+export interface UncategorizedItem {
+  path: string;
+  /** Raw scanner reason string, shown muted for debugging only. */
+  reason: string;
+  candidates: ManualIdentifyCandidate[];
+  addedAt: number;
+  scannedAt: number;
+}
+
+export const apiUncategorizedList = (): Promise<UncategorizedItem[]> =>
+  api<{ items: UncategorizedItem[] }>('/api/library/uncategorized').then((r) => r.items);
+
+/** Request body for rescue-by-path. Mirrors the episode identify body but is
+ *  keyed by file `path` (a needs_review entry has no integer row id). */
+export type UncategorizedIdentifyBody =
+  | {
+      path: string;
+      tmdbId: number;
+      type: 'movie' | 'series';
+      season?: number;
+      episode?: number;
+      seInput?: string;
+    }
+  | {
+      path: string;
+      link: string;
+      season?: number;
+      episode?: number;
+      seInput?: string;
+    };
+
+/** Rescue an uncategorized file: assign it to a movie/series, pinning it via a
+ *  manual override and clearing the needs_review entry. 409 if a scan is
+ *  running; 404 if the path is no longer in needs_review or its file is gone. */
+export async function apiUncategorizedIdentify(
+  body: UncategorizedIdentifyBody,
+): Promise<{ ok: true; item?: LibraryItem | null; episode?: Episode | null }> {
+  const r = await fetch('/api/library/uncategorized/identify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 409) throw new Error('A scan is in progress — try again when it finishes.');
+  if (r.status === 404) {
+    const e = (await r.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(
+      e?.error === 'file_missing'
+        ? "That file is no longer on disk."
+        : 'That file is no longer pending review.',
+    );
+  }
+  if (r.status === 400) {
+    const e = (await r.json().catch(() => null)) as { error?: string } | null;
+    const msg =
+      e?.error === 'episode_requires_series'
+        ? "You entered an episode number, but that match is a movie. Pick the TV series instead (or clear the episode field for a movie)."
+        : e?.error === 'type_mismatch'
+          ? "That match isn't the type you picked. Search again and choose the right result."
+          : e?.error === 'bad_se_input'
+            ? "Couldn't read that episode — use \"S03E01\", \"3x1\", or an absolute number like \"220\"."
+            : e?.error === 'absolute_out_of_range'
+              ? "That absolute episode number is past the end of this series. Check the number, or use \"S03E01\" instead."
+              : 'That match could not be applied.';
+    throw new Error(msg);
+  }
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as { ok: true; item?: LibraryItem | null; episode?: Episode | null };
+}
+
+/** Eject a misclassified library item back to the Uncategorized view. Removes
+ *  the gated item + its manual override(s) and returns its underlying file(s)
+ *  to needs_review. Used to escape a one-way mis-identification (e.g. a series
+ *  episode wrongly gated as a movie). 409 if a scan is running. */
+export async function apiManualIdentifyEject(
+  id: number,
+): Promise<{ ok: true; ejected: number; paths: string[] }> {
+  const r = await fetch(`/api/manual-identify/item/${id}/eject`, { method: 'POST' });
+  if (r.status === 409) throw new Error('A scan is in progress — try again when it finishes.');
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return (await r.json()) as { ok: true; ejected: number; paths: string[] };
+}
+
 /** POST a diagnostic report to the server log. Used by the player's Report
  *  button — the body is logged verbatim to the server console. */
 export async function apiClientLog(payload: unknown): Promise<void> {

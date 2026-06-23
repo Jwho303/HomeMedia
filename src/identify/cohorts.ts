@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { parseFilename } from '../parse.js';
-import { extractEpisode, type KnownSeason } from './episode.js';
+import { extractEpisode, extractAbsoluteNumber, absoluteToSe, type KnownSeason } from './episode.js';
 import { generateHypotheses, isSubFolderMarker, pathContext } from './hypotheses.js';
 import { ABSOLUTE_THRESHOLD, MARGIN, scoreCandidate } from './score.js';
 import { indexOfFirstTag } from './release-tags.js';
@@ -677,8 +677,55 @@ export async function identifyCohort(
 
 export type FileFit =
   | { kind: 'movie'; tmdbId: number; confidence: number }
-  | { kind: 'episode'; tmdbId: number; season: number; episode: number; confidence: number }
+  | {
+      kind: 'episode';
+      tmdbId: number;
+      season: number;
+      episode: number;
+      /** The series-wide absolute episode number, when this file was placed via
+       *  absolute numbering. TMDB sometimes labels season episodes with the
+       *  absolute number (e.g. Naruto S2 episodes are episode_number 53–104, not
+       *  1–52), so metadata lookup needs the absolute value as a fallback key. */
+      absolute?: number;
+      confidence: number;
+    }
   | { kind: 'unfit'; reason: 'episode_unresolved' | 'low_score' };
+
+/**
+ * Decide whether a cohort uses absolute (series-wide) episode numbering — anime
+ * ripped as 001–220 with no SxxEyy and no Season folders. True iff a strong
+ * majority of files are bare absolute numbers AND the largest one runs past the
+ * first season's episode count (so plain per-season numbering can't explain
+ * them). The episode-count guard is what keeps a normal show whose files are
+ * "01.mkv".."12.mkv" — all within season 1 — from being treated as absolute.
+ */
+export function cohortIsAbsoluteNumbered(
+  cohort: Pick<Cohort, 'files'>,
+  identityTitle: string,
+  known: ReadonlyArray<KnownSeason> | null,
+): boolean {
+  const files = cohort.files;
+  if (files.length === 0 || !known || known.length === 0) return false;
+  // Only meaningful for multi-season shows; a single-season show has no
+  // absolute-vs-relative ambiguity.
+  const realSeasons = known.filter((s) => s.season_number >= 1 && s.episode_count > 0);
+  if (realSeasons.length < 2) return false;
+  const firstSeasonCount = realSeasons
+    .slice()
+    .sort((a, b) => a.season_number - b.season_number)[0]!.episode_count;
+
+  let bareCount = 0;
+  let maxNum = 0;
+  for (const f of files) {
+    const n = extractAbsoluteNumber(f.relPosix, identityTitle);
+    if (n != null) {
+      bareCount++;
+      if (n > maxNum) maxNum = n;
+    }
+  }
+  const ratio = bareCount / files.length;
+  return ratio >= 0.7 && maxNum > firstSeasonCount;
+}
 
 export async function fitFileIntoCohort(
   file: FileEntry,
@@ -697,6 +744,31 @@ export async function fitFileIntoCohort(
     } catch {
       known = null;
     }
+  }
+
+  // Absolute (series-wide) numbering: when the whole cohort is bare-numbered
+  // anime (001–220) the per-file shorthand in extractEpisode either fails (e.g.
+  // "060" → S0E60, rejected) or — worse — mis-fits ("220" → S2E20). Map the
+  // absolute number through the season list instead, for the whole cohort.
+  if (cohortIsAbsoluteNumbered(_cohort, identity.title, known)) {
+    const abs = extractAbsoluteNumber(file.relPosix, identity.title);
+    if (abs != null) {
+      const mapped = absoluteToSe(abs, known);
+      if (mapped) {
+        return {
+          kind: 'episode',
+          tmdbId: identity.tmdbId,
+          season: mapped.season,
+          episode: mapped.episode,
+          absolute: abs,
+          confidence: 0.85,
+        };
+      }
+      // Absolute number ran past the series — leave for review rather than guess.
+      return { kind: 'unfit', reason: 'episode_unresolved' };
+    }
+    // Not a bare number (e.g. a stray "Specials/extra.mkv" in an otherwise
+    // absolute cohort) — fall through to the normal extractor below.
   }
 
   const ep = extractEpisode(file.relPosix, identity.title, known);

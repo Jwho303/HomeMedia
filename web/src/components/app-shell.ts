@@ -21,6 +21,7 @@ import './series-detail.js';
 import './media-player.js';
 import './search-view.js';
 import './settings-view.js';
+import './uncategorized-view.js';
 import './ftue-wizard.js';
 import { FTUE_COMPLETE_EVENT } from './ftue-wizard.js';
 import './manual-identify-modal.js';
@@ -240,6 +241,8 @@ export class AppShell extends LitElement {
         return html`<search-view></search-view>`;
       case 'settings':
         return html`<settings-view></settings-view>`;
+      case 'uncategorized':
+        return html`<uncategorized-view></uncategorized-view>`;
       case 'unknown':
       default:
         return html`<div style="padding:24px">Unknown route: ${this.route.name === 'unknown' ? this.route.hash : ''}</div>`;

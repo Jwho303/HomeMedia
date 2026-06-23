@@ -63,15 +63,17 @@ describe('<home-header> layout (0.1.5.1)', () => {
     expect(spy).toHaveBeenCalledWith({ full: false });
   });
 
-  it('opens gear menu and renders Hard refresh + Re-probe library entries', async () => {
+  it('opens gear menu and renders Hard refresh, Re-probe, Uncategorized, Settings entries', async () => {
     const el = await mount();
     const gearBtn = el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.action-btn')[1]!;
     gearBtn.click();
     await el.updateComplete;
     const items = el.shadowRoot!.querySelectorAll('.action-group .sort-menu button');
-    expect(items.length).toBe(2);
+    expect(items.length).toBe(4);
     expect(items[0]?.textContent).toContain('Hard refresh');
     expect(items[1]?.textContent).toContain('Re-probe');
+    expect(items[2]?.textContent).toContain('Uncategorized');
+    expect(items[3]?.textContent).toContain('Settings');
   });
 
   it('hard refresh menu item is disabled while a job is active', async () => {

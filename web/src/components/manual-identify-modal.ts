@@ -4,7 +4,9 @@ import {
   apiManualIdentifySearch,
   apiManualIdentifyItem,
   apiManualIdentifyEpisode,
+  apiUncategorizedIdentify,
   ShareOfflineError,
+  type UncategorizedIdentifyBody,
 } from '../api.js';
 import type {
   Episode,
@@ -16,7 +18,11 @@ import type {
 
 export type ManualIdentifyTarget =
   | { kind: 'item'; id: number; row: LibraryItem }
-  | { kind: 'episode'; id: number; row: Episode; seriesTitle: string | null };
+  | { kind: 'episode'; id: number; row: Episode; seriesTitle: string | null }
+  // Path-keyed rescue of an uncategorized (needs_review) file. There is no
+  // integer row id and no known type — the user picks movie or series, and the
+  // optional S/E input applies when they choose a series.
+  | { kind: 'uncategorized'; path: string };
 
 const SEARCH_DEBOUNCE_MS = 200;
 
@@ -356,6 +362,10 @@ export class ManualIdentifyModal extends LitElement {
     if (t.kind === 'item') {
       return t.row.title ?? basename(t.row.path);
     }
+    if (t.kind === 'uncategorized') {
+      // No identity yet — seed from the filename so the first search is useful.
+      return basename(t.path);
+    }
     // Episode: prefer the parent series title; fall back to the file name.
     return t.seriesTitle ?? basename(t.row.path);
   }
@@ -463,6 +473,20 @@ export class ManualIdentifyModal extends LitElement {
             composed: true,
           }),
         );
+      } else if (this.target.kind === 'uncategorized') {
+        const body = this.buildUncategorizedBody(this.target.path);
+        if (!body) {
+          this.applying = false;
+          return;
+        }
+        const r = await apiUncategorizedIdentify(body);
+        this.dispatchEvent(
+          new CustomEvent('applied', {
+            detail: { kind: 'uncategorized', path: this.target.path, item: r.item, episode: r.episode },
+            bubbles: true,
+            composed: true,
+          }),
+        );
       } else {
         const body = this.buildEpisodeBody();
         if (!body) {
@@ -517,6 +541,25 @@ export class ManualIdentifyModal extends LitElement {
     return null;
   }
 
+  private buildUncategorizedBody(path: string): UncategorizedIdentifyBody | null {
+    const trimmedSe = this.seInput.trim();
+    if (this.selected) {
+      const body: UncategorizedIdentifyBody = {
+        path,
+        tmdbId: this.selected.tmdbId,
+        type: this.selected.type,
+      };
+      if (trimmedSe.length > 0) body.seInput = trimmedSe;
+      return body;
+    }
+    if (this.link.trim().length > 0) {
+      const body: UncategorizedIdentifyBody = { path, link: this.link.trim() };
+      if (trimmedSe.length > 0) body.seInput = trimmedSe;
+      return body;
+    }
+    return null;
+  }
+
   private cancel(): void {
     this.open = false;
     this.dispatchEvent(
@@ -541,7 +584,7 @@ export class ManualIdentifyModal extends LitElement {
         <div class="body">
           ${this.renderCurrent(t)}
           ${this.renderSearch()}
-          ${t.kind === 'episode' ? this.renderSeInput() : null}
+          ${t.kind === 'episode' || t.kind === 'uncategorized' ? this.renderSeInput() : null}
           ${this.renderResults()}
           ${this.renderLink()}
           ${this.error ? html`<div class="error">${this.error}</div>` : null}
@@ -559,6 +602,20 @@ export class ManualIdentifyModal extends LitElement {
   }
 
   private renderCurrent(t: ManualIdentifyTarget): unknown {
+    if (t.kind === 'uncategorized') {
+      return html`
+        <div>
+          <div class="section-label">Uncategorized file</div>
+          <div class="current">
+            <div class="poster">🎬</div>
+            <div class="meta">
+              <div class="name">${basename(t.path)}</div>
+              <div class="ids">Not yet in Movies or Series</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
     if (t.kind === 'item') {
       const i = t.row;
       const ids: string[] = [];
@@ -614,10 +671,10 @@ export class ManualIdentifyModal extends LitElement {
         <input
           type="text"
           .value=${this.seInput}
-          placeholder="S04E01, 4x1, or leave blank to keep current"
+          placeholder="S04E01, 4x1, 220, or leave blank to keep current"
           @input=${(e: Event): void => this.onSeInput(e)}
         />
-        <div class="hint">Pasting "S04E01" or "4x1" overrides the parsed S/E. Leave blank to keep current.</div>
+        <div class="hint">For a series, enter the episode (e.g. "S03E01" or "3x1"), or a single absolute number (e.g. "220") for shows numbered straight through all seasons. Leave blank for a movie or to auto-detect from the filename.</div>
       </div>
     `;
   }

@@ -85,6 +85,15 @@ export function padEp(num: number): string {
   return String(num).padStart(2, '0');
 }
 
+/** The number to LABEL an episode with. Prefers the series-wide absolute number
+ *  (e.g. Naruto S2 shows 053–104) when the show is absolute-numbered; otherwise
+ *  the per-season episode number. Padding widens to 3 digits for absolute
+ *  numbers so "053" reads as an absolute label, not a typo'd "53". */
+export function episodeLabel(ep: { episode: number; absoluteNumber: number | null }): string {
+  if (ep.absoluteNumber != null) return String(ep.absoluteNumber).padStart(3, '0');
+  return padEp(ep.episode);
+}
+
 /**
  * How many half-viewport "pages" the strip's scroll range divides into.
  *
@@ -628,7 +637,7 @@ export class SeasonStrip extends LitElement {
         <div class="thumb-wrap">
           ${ep.stillUrl
             ? html`<img src=${ep.stillUrl} alt="" loading="lazy" />`
-            : html`<div class="placeholder">E${ep.episode}</div>`}
+            : html`<div class="placeholder">E${episodeLabel(ep)}</div>`}
           <watched-button
             .watched=${ep.watched}
             .kind=${'episode'}
@@ -639,7 +648,7 @@ export class SeasonStrip extends LitElement {
           ${badge ? html`<span class="duration-badge">${badge}</span>` : null}
         </div>
         <div class="caption">
-          <span class="ep-num">${padEp(ep.episode)} -</span>${ep.title ?? ''}
+          <span class="ep-num">${episodeLabel(ep)} -</span>${ep.title ?? ''}
         </div>
       </div>
     `;
@@ -648,8 +657,8 @@ export class SeasonStrip extends LitElement {
   private renderHero(ep: Episode, mode: HeroMode): unknown {
     const labelText =
       mode === 'resume'
-        ? `CONTINUE · S${ep.season} · E${ep.episode}`
-        : `UP NEXT · S${ep.season} · E${ep.episode}`;
+        ? `CONTINUE · S${ep.season} · E${episodeLabel(ep)}`
+        : `UP NEXT · S${ep.season} · E${episodeLabel(ep)}`;
     const badge = formatRuntime(pickBadgeRuntime(ep));
     const ratio =
       mode === 'resume' && ep.duration > 0
@@ -665,7 +674,7 @@ export class SeasonStrip extends LitElement {
         <div class="thumb-wrap">
           ${ep.stillUrl
             ? html`<img src=${ep.stillUrl} alt="" />`
-            : html`<div class="placeholder">E${ep.episode}</div>`}
+            : html`<div class="placeholder">E${episodeLabel(ep)}</div>`}
           <span class="accent-label">${labelText}</span>
           <div class="play-overlay"><div class="circle"><div class="triangle"></div></div></div>
           <watched-button
@@ -681,7 +690,7 @@ export class SeasonStrip extends LitElement {
             : null}
         </div>
         <div class="caption">
-          <span class="ep-num">${padEp(ep.episode)} -</span>${ep.title ?? ep.path}
+          <span class="ep-num">${episodeLabel(ep)} -</span>${ep.title ?? ep.path}
         </div>
       </div>
     `;

@@ -20,6 +20,7 @@ import { registerAdminRoutes } from './routes/admin.js';
 import { registerSubsRoutes } from './routes/subs.js';
 import { registerEmbeddedSubsRoutes } from './routes/embedded-subs.js';
 import { registerManualIdentifyRoutes } from './routes/manual-identify.js';
+import { registerUncategorizedRoutes } from './routes/uncategorized.js';
 import { shareGuard } from './middleware/share-guard.js';
 import { requireConfigured } from './middleware/require-configured.js';
 import { getHlsSessionManager } from './streaming/hls-session.js';
@@ -93,6 +94,7 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     await registerLibraryRoutes(s);
     await registerPlaybackRoutes(s);
     await registerManualIdentifyRoutes(s);
+    await registerUncategorizedRoutes(s);
   });
   // Client-log accepts diagnostic reports from the player UI. Registered
   // outside every guard on purpose: reports about playback failures are most

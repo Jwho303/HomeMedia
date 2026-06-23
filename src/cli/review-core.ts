@@ -27,7 +27,12 @@ export interface CandidateView {
 
 export type ReviewAction =
   | { kind: 'pick'; index: number }
-  | { kind: 'tmdb'; id: number }
+  // `type`, when present, is the media type the user explicitly chose (e.g. by
+  // selecting a series result in the picker). TMDB ids are namespaced per type
+  // — movie/323411 and tv/323411 are unrelated titles — so resolution MUST honour
+  // it and fetch only that type. Omitted (e.g. a pasted `tmdb:NNN` with no type)
+  // → fall back to movie-first probing.
+  | { kind: 'tmdb'; id: number; type?: 'movie' | 'series' }
   | { kind: 'imdb'; id: string }
   | { kind: 'tvdb'; id: number }
   | { kind: 'retitle'; title: string }
@@ -124,8 +129,7 @@ export async function resolveAction(
       };
     }
     case 'tmdb': {
-      // Look up the tmdb id directly.
-      try {
+      const asMovie = async (): Promise<{ identity: import('../identify/apply.js').ApplyIdentity; reason: string }> => {
         const movie = await ctx.tmdb.getMovie(action.id);
         const ext = await ctx.tmdb.getMovieExternalIds(action.id);
         return {
@@ -140,10 +144,8 @@ export async function resolveAction(
           },
           reason: 'tmdb-link',
         };
-      } catch {
-        // Fall through to series.
-      }
-      try {
+      };
+      const asSeries = async (): Promise<{ identity: import('../identify/apply.js').ApplyIdentity; reason: string }> => {
         const series = await ctx.tmdb.getSeries(action.id);
         const ext = await ctx.tmdb.getSeriesExternalIds(action.id);
         return {
@@ -158,6 +160,29 @@ export async function resolveAction(
           },
           reason: 'tmdb-link',
         };
+      };
+
+      // The user explicitly picked a type → resolve ONLY that type. TMDB ids are
+      // per-type (movie/323411 = "Theodora", tv/323411 = "The Vampire Lestat"),
+      // so movie-first probing would silently mis-resolve a series pick. No
+      // fallback: if the chosen type can't be fetched, return null so the caller
+      // surfaces an error rather than swapping to the other type.
+      if (action.type === 'series') {
+        try { return await asSeries(); } catch { return null; }
+      }
+      if (action.type === 'movie') {
+        try { return await asMovie(); } catch { return null; }
+      }
+
+      // No type supplied (e.g. a pasted `tmdb:NNN`) → legacy movie-first probe,
+      // then series.
+      try {
+        return await asMovie();
+      } catch {
+        // Fall through to series.
+      }
+      try {
+        return await asSeries();
       } catch {
         return null;
       }
@@ -254,7 +279,19 @@ const SE_INPUT_RES: Array<RegExp> = [
   /^[sS]eason\s*(\d{1,2})\s*[eE](?:pisode)?\s*(\d{1,3})$/i,
 ];
 
-export function parseSeInput(s: string): { season: number; episode: number } | null {
+// Absolute (series-wide) episode numbering — e.g. anime ripped as 001–220 with
+// no per-season split. A bare number, or an explicit `E###` / `####` marker,
+// means "the Nth episode counting across every season". Mapped to (season,
+// episode) later against the show's TMDB season list (see absoluteToSe).
+const ABSOLUTE_INPUT_RE = /^[eE#]?(\d{1,4})$/;
+
+/** A parsed episode reference: either an explicit season+episode, or an
+ *  absolute episode number that still needs the show's season list to resolve. */
+export type ParsedSeInput =
+  | { season: number; episode: number }
+  | { absolute: number };
+
+export function parseSeInput(s: string): ParsedSeInput | null {
   const trimmed = s.trim().replace(/\s+/g, '');
   for (const re of SE_INPUT_RES) {
     const m = re.exec(trimmed);
@@ -262,8 +299,20 @@ export function parseSeInput(s: string): { season: number; episode: number } | n
       return { season: Number(m[1]), episode: Number(m[2]) };
     }
   }
+  // Fall through to absolute numbering only after the season+episode forms have
+  // had their chance, so "4x2" is never misread as the bare number "42".
+  const abs = ABSOLUTE_INPUT_RE.exec(trimmed);
+  if (abs) {
+    const n = Number(abs[1]);
+    if (n >= 1) return { absolute: n };
+  }
   return null;
 }
+
+// Absolute (series-wide) → (season, episode) mapping lives with the other
+// episode-extraction logic in identify/episode.ts; re-exported here so the
+// CLI/route callers that already import it from review-core keep working.
+export { absoluteToSe } from '../identify/episode.js';
 
 export interface ApplyChosenInput {
   row: ReviewItemRow;

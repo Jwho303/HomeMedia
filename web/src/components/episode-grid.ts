@@ -2,6 +2,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import type { Episode, SeriesDetail } from '../types.js';
 import { iconCheck, iconPlay } from './icons.js';
+import { episodeLabel } from './season-strip.js';
 
 export type TileState = 'watched' | 'current' | 'unwatched';
 
@@ -247,19 +248,19 @@ export class EpisodeGrid extends LitElement {
             const ratio = state === 'current' ? progressRatio(ep) : 0;
             const label =
               state === 'current'
-                ? html`<span>Now · E${ep.episode}</span>`
-                : html`<span>E${ep.episode}</span>`;
+                ? html`<span>Now · E${episodeLabel(ep)}</span>`
+                : html`<span>E${episodeLabel(ep)}</span>`;
             return html`
               <button
                 class=${`tile ${state}`}
                 style="--stagger-index:${idx}"
                 @click=${(): void => this.onTileClick(ep)}
-                title=${ep.title ?? `Episode ${ep.episode}`}
+                title=${ep.title ?? `Episode ${episodeLabel(ep)}`}
               >
                 <div class="thumb">
                   ${ep.stillUrl
                     ? html`<img src=${ep.stillUrl} alt="" loading="lazy"/>`
-                    : html`<div class="placeholder">E${ep.episode}</div>`}
+                    : html`<div class="placeholder">E${episodeLabel(ep)}</div>`}
                   <div class="check">${iconCheck()}</div>
                   ${state === 'current'
                     ? html`

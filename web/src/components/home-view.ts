@@ -4,9 +4,10 @@ import {
   apiContinue,
   apiItemSetWatched,
   apiLibrary,
+  apiManualIdentifyEject,
   ShareOfflineError,
 } from '../api.js';
-import { navigate } from '../router.js';
+import { navigate, uncategorizedHref } from '../router.js';
 import type { ContinueRow, Library, ShareStatus } from '../types.js';
 import {
   computeChunks,
@@ -276,6 +277,8 @@ export class HomeView extends LitElement {
         class="body"
         @item-watched-change=${(e: CustomEvent<{ item: { id: number }; watched: boolean }>): void => void this.onItemWatched(e)}
         @manual-identify-item-request=${(e: CustomEvent<{ id: number; type: 'movie' | 'series' }>): void => this.onManualIdentifyItemRequest(e)}
+        @eject-item-request=${(e: CustomEvent<{ id: number; title: string }>): void => void this.onEjectItem(e)}
+        @reimport-series-request=${(e: CustomEvent<{ id: number; title: string }>): void => void this.onReimportSeries(e)}
       >
         ${chunks.map(
           (c) => html`
@@ -312,6 +315,56 @@ export class HomeView extends LitElement {
         composed: true,
       }),
     );
+  }
+
+  /** Eject a misclassified movie back to the Uncategorized view, then take the
+   *  user there to re-identify it. The file leaves Movies and reappears in the
+   *  uncategorized list. */
+  private async onEjectItem(e: CustomEvent<{ id: number; title: string }>): Promise<void> {
+    const ok = window.confirm(
+      `Move "${e.detail.title}" out of Movies and back to Uncategorized? ` +
+        `Use this if it isn't really a movie (e.g. it's a TV episode). ` +
+        `You can then re-identify it from the Uncategorized list.`,
+    );
+    if (!ok) return;
+    try {
+      await apiManualIdentifyEject(e.detail.id);
+      await this.load();
+      // Other views (and the uncategorized list) refetch on this.
+      document.dispatchEvent(new CustomEvent('library-invalidated'));
+      navigate(uncategorizedHref());
+    } catch (err) {
+      this.error = (err as Error).message ?? 'Failed to move item to Uncategorized.';
+    }
+  }
+
+  /** Re-import a series: drop its local data (eject → all episode files return
+   *  to needs_review) and immediately kick off a smart refresh so the scanner
+   *  re-identifies them from scratch. Fixes mis-placed episodes such as
+   *  absolute-numbered anime that landed in the wrong seasons. */
+  private async onReimportSeries(e: CustomEvent<{ id: number; title: string }>): Promise<void> {
+    const ok = window.confirm(
+      `Re-import "${e.detail.title}"? This drops its current episodes and rescans ` +
+        `the files to re-identify them. Use this if episodes are in the wrong ` +
+        `seasons (e.g. anime numbered straight through). Your video files are not touched.`,
+    );
+    if (!ok) return;
+    try {
+      await apiManualIdentifyEject(e.detail.id);
+      await this.load();
+      document.dispatchEvent(new CustomEvent('library-invalidated'));
+      // Hand off to <app-shell> (owns the scan EventSource) for a smart refresh
+      // that re-attaches the freed files with progress shown in the usual UI.
+      this.dispatchEvent(
+        new CustomEvent('refresh-trigger', {
+          detail: { full: false },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (err) {
+      this.error = (err as Error).message ?? 'Failed to re-import series.';
+    }
   }
 
   private async onItemWatched(
@@ -388,4 +441,10 @@ function persistToggle(value: LibraryToggle): void {
   } catch {
     // ignore storage failures
   }
+}
+
+/** Persist the desired Movies/Series tab from outside <home-view> (e.g. the
+ *  Uncategorized view's nav) so navigating home lands on the right tab. */
+export function setHomeToggle(value: LibraryToggle): void {
+  persistToggle(value);
 }

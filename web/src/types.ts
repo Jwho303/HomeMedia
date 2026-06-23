@@ -59,6 +59,9 @@ export interface Episode {
   path: string;
   season: number;
   episode: number;
+  /** Series-wide number for absolute-numbered shows (e.g. Naruto); null
+   *  otherwise. Preferred over `episode` for the displayed label when present. */
+  absoluteNumber: number | null;
   title: string | null;
   overview: string | null;
   stillUrl: string | null;

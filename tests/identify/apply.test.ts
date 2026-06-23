@@ -119,6 +119,44 @@ describe('applyIdentity', () => {
     expect(movies).toHaveLength(1);
   });
 
+  it('series: recovers episode metadata when TMDB labels episodes by absolute number', async () => {
+    // Naruto-shaped: S2 (52 eps) but TMDB labels them episode_number 53–104.
+    // Applying S2E1 must still find the title/still via the absolute fallback.
+    const fakeTmdb = {
+      getSeries: async () => ({
+        id: 46260,
+        name: 'Naruto',
+        seasons: [
+          { season_number: 1, episode_count: 52 },
+          { season_number: 2, episode_count: 52 },
+        ],
+      }),
+      getEpisodes: async (_id: number, season: number) => ({
+        id: season,
+        season_number: season,
+        // S2 episodes carry the ABSOLUTE label 53.. (not 1..).
+        episodes:
+          season === 2
+            ? [{ episode_number: 53, name: 'Long Time No See', overview: 'o', still_path: '/s2e1.jpg', runtime: 24 }]
+            : [],
+      }),
+      stillUrl: (p: string | null | undefined) => (p ? `https://img/${p}` : null),
+    };
+
+    await applyIdentity(
+      'all seasons of naruto/Season 2/Naruto  053 - Long Time No See.mkv',
+      { tmdbId: 46260, type: 'series', title: 'Naruto', year: 2002 },
+      { confidence: 0.85, season: 2, episode: 1, mtime: 1, scannedAt: 2 },
+      { db, tmdb: fakeTmdb as never },
+    );
+
+    const ep = db.getEpisodeByPath('all seasons of naruto/Season 2/Naruto  053 - Long Time No See.mkv')!;
+    expect(ep.season).toBe(2);
+    expect(ep.episode).toBe(1);
+    expect(ep.title).toBe('Long Time No See');
+    expect(ep.still_url).toBe('https://img//s2e1.jpg');
+  });
+
   it('reuses existing series row when one already exists for the tmdb_id', async () => {
     const existing = db.upsertItem({
       path: 'Show', type: 'series', tmdb_id: 200, title: 'Show', year: 2010,

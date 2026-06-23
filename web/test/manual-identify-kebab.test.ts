@@ -35,6 +35,7 @@ function ep(overrides: Partial<Episode> = {}): Episode {
     episode: 99,
     title: null,
     overview: null,
+    absoluteNumber: null,
     stillUrl: null,
     runtimeSeconds: null,
     position: 0,

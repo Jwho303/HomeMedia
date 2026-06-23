@@ -39,6 +39,7 @@ function ep(season: number, episode: number, opts: Partial<Episode> = {}): Episo
     episode,
     title: `Ep ${season}.${episode}`,
     overview: null,
+    absoluteNumber: null,
     stillUrl: null,
     runtimeSeconds: null,
     position: 0,

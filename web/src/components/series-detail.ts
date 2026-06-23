@@ -2,11 +2,12 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import {
   apiItemSetWatched,
+  apiManualIdentifyEject,
   apiPathSetWatched,
   apiSeries,
   ShareOfflineError,
 } from '../api.js';
-import { goBack, homeHref } from '../router.js';
+import { goBack, homeHref, navigate } from '../router.js';
 import type { Episode, Library, LibraryItem, SeriesDetail } from '../types.js';
 import './season-strip.js';
 import './watched-button.js';
@@ -307,6 +308,10 @@ export class SeriesDetailView extends LitElement {
                     ?disabled=${this.scan.active || this.detail == null}
                     @click=${(): void => this.onManualIdentifySeries()}
                   >Identify manually…</button>
+                  <button
+                    ?disabled=${this.scan.active || this.detail == null}
+                    @click=${(): void => void this.onReimportSeries()}
+                  >Re-import (rescan files)</button>
                 </div>`
               : null}
           </div>
@@ -401,6 +406,40 @@ export class SeriesDetailView extends LitElement {
         composed: true,
       }),
     );
+  }
+
+  /** Re-import this series: drop its local data (eject returns every episode
+   *  file to needs_review) and kick off a smart refresh so the scanner
+   *  re-identifies them from scratch — fixing mis-placed episodes such as
+   *  absolute-numbered anime. The series row disappears, so navigate home where
+   *  the refresh progress shows; it reappears once the rescan re-creates it. */
+  private async onReimportSeries(): Promise<void> {
+    if (!this.detail) return;
+    this.gearOpen = false;
+    const title = this.detail.series.title ?? 'this series';
+    const ok = window.confirm(
+      `Re-import "${title}"? This drops its current episodes and rescans the ` +
+        `files to re-identify them. Use this if episodes are in the wrong seasons ` +
+        `(e.g. anime numbered straight through). Your video files are not touched.`,
+    );
+    if (!ok) return;
+    try {
+      await apiManualIdentifyEject(this.detail.series.id);
+      document.dispatchEvent(new CustomEvent('library-invalidated'));
+      // Hand off to <app-shell> (owns the scan EventSource) for a smart refresh
+      // that re-attaches the freed files. Dispatch BEFORE navigating, while this
+      // element is still connected, so the bubbling event reaches <app-shell>.
+      this.dispatchEvent(
+        new CustomEvent('refresh-trigger', {
+          detail: { full: false },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      navigate(homeHref());
+    } catch (err) {
+      this.error = (err as Error).message ?? 'Failed to re-import series.';
+    }
   }
 
   private async onSeriesWatchedChange(

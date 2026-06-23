@@ -39,6 +39,7 @@ function episode(overrides: Partial<Episode> = {}): Episode {
     episode: 99,
     title: null,
     overview: null,
+    absoluteNumber: null,
     stillUrl: null,
     runtimeSeconds: null,
     position: 0,
@@ -343,6 +344,51 @@ describe('<manual-identify-modal>', () => {
     expect(body.tmdbId).toBe(136315);
     expect(body.type).toBe('series');
     expect(body.seInput).toBe('S04E01');
+    document.body.removeChild(el);
+  });
+
+  it('uncategorized-kind modal seeds from the filename, shows S/E input, and POSTs path + seInput', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(async () => mockJson({
+        candidates: [
+          { tmdbId: 128098, imdbId: null, tvdbId: null, title: 'Interview with the Vampire', year: 2022, type: 'series', overview: null, posterUrl: null, score: 1, sources: ['tmdb'] },
+        ],
+      }))
+      .mockImplementationOnce(async () => mockJson({ ok: true, episode: { id: 9 } }));
+
+    const el = await mountModal({ kind: 'uncategorized', path: 'Vampire/S03E01.mkv' });
+
+    // Seeds the search input with the file basename.
+    const searchInput = el.shadowRoot!.querySelector('.search-input') as HTMLInputElement;
+    expect(searchInput.value).toBe('S03E01.mkv');
+    // The "current" block labels it as an uncategorized file.
+    expect(el.shadowRoot!.querySelector('.current .meta .name')?.textContent).toContain('S03E01.mkv');
+
+    await flushDebounce();
+    await el.updateComplete;
+
+    // Inputs: [search, seInput, link] — the S/E input is shown for this kind.
+    const inputs = el.shadowRoot!.querySelectorAll('input[type="text"]');
+    expect(inputs.length).toBe(3);
+    const seInput = inputs[1] as HTMLInputElement;
+    seInput.value = 'S03E01';
+    seInput.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const appliedSpy = vi.fn();
+    el.addEventListener('applied', appliedSpy as EventListener);
+    (el.shadowRoot!.querySelector('.result') as HTMLButtonElement).click();
+    await el.updateComplete;
+    (el.shadowRoot!.querySelector('button.action.primary') as HTMLButtonElement).click();
+    await tick(5);
+    await el.updateComplete;
+
+    expect(appliedSpy).toHaveBeenCalledOnce();
+    expect(el.open).toBe(false);
+    const lastCall = fetchSpy.mock.calls[fetchSpy.mock.calls.length - 1]!;
+    expect(String(lastCall[0])).toBe('/api/library/uncategorized/identify');
+    const body = JSON.parse(String((lastCall[1] as RequestInit).body));
+    expect(body).toEqual({ path: 'Vampire/S03E01.mkv', tmdbId: 128098, type: 'series', seInput: 'S03E01' });
     document.body.removeChild(el);
   });
 

@@ -377,6 +377,9 @@ export class HomeHeader extends LitElement {
                     @click=${(): void => this.emitReprobeLibrary()}
                   >Re-probe library</button>
                   <button
+                    @click=${(): void => { this.gearOpen = false; navigate('#/uncategorized'); }}
+                  >Uncategorized media</button>
+                  <button
                     @click=${(): void => { this.gearOpen = false; navigate('#/settings'); }}
                   >Settings</button>
                 </div>`

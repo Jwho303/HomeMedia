@@ -1567,7 +1567,16 @@ async function persistSeriesCohort(
       seasonEpisodesCache.set(cacheKey, seasonData);
     }
 
-    const ep = seasonData?.episodes.find((e) => e.episode_number === fit.episode);
+    // Match TMDB's episode within the season. Prefer the per-season episode
+    // number, but fall back to the absolute number: some shows (e.g. Naruto)
+    // have TMDB episodes labeled with the SERIES-WIDE number (S2 = 53–104, not
+    // 1–52), so the relative lookup misses and we'd otherwise persist a blank
+    // title/still. The absolute fallback recovers the metadata.
+    const ep =
+      seasonData?.episodes.find((e) => e.episode_number === fit.episode) ??
+      (fit.absolute != null
+        ? seasonData?.episodes.find((e) => e.episode_number === fit.absolute)
+        : undefined);
 
     const epExisting = db.getEpisodeByPath(f.relPosix);
     db.upsertEpisode({
@@ -1575,6 +1584,7 @@ async function persistSeriesCohort(
       path: f.relPosix,
       season: fit.season,
       episode: fit.episode,
+      absolute_number: fit.absolute ?? null,
       title: ep?.name ?? null,
       overview: ep?.overview ?? null,
       still_url: t.stillUrl(ep?.still_path),

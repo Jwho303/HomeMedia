@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS episodes (
   path                TEXT UNIQUE NOT NULL,
   season              INTEGER NOT NULL,
   episode             INTEGER NOT NULL,
+  absolute_number     INTEGER,                 -- series-wide number for absolute-numbered shows (e.g. Naruto); NULL otherwise
   title               TEXT,
   overview            TEXT,
   still_url           TEXT,

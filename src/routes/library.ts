@@ -106,6 +106,9 @@ interface EpisodeDto {
   path: string;
   season: number;
   episode: number;
+  /** Series-wide number for absolute-numbered shows; null otherwise. The UI
+   *  prefers this over `episode` for the episode label when present. */
+  absoluteNumber: number | null;
   title: string | null;
   overview: string | null;
   stillUrl: string | null;
@@ -145,6 +148,7 @@ function toEpisodeDto(row: EpisodeWithPlaybackRow): EpisodeDto {
     path: row.path,
     season: row.season,
     episode: row.episode,
+    absoluteNumber: row.absolute_number ?? null,
     title: row.title,
     overview: row.overview,
     stillUrl: row.still_url,

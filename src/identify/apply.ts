@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { extractEpisode, type KnownSeason } from './episode.js';
+import { extractEpisode, absoluteOfSe, type KnownSeason } from './episode.js';
 import * as tmdb from '../tmdb.js';
 import type { DbHandle, MediaItemRow } from '../db.js';
 
@@ -31,6 +31,10 @@ export interface ApplyOptions {
   /** When set, manually-supplied season/episode (skips extractor). */
   season?: number | undefined;
   episode?: number | undefined;
+  /** Series-wide absolute number, when known (drives the absolute UI label).
+   *  If omitted, applyIdentity still infers it for shows TMDB labels by
+   *  absolute number (the metadata-lookup fallback). */
+  absolute?: number | undefined;
   /** mtime of the file on disk; used as the row mtime. */
   mtime: number;
   scannedAt: number;
@@ -49,6 +53,26 @@ export interface ApplyDeps {
 export type ApplyResult =
   | { kind: 'movie'; itemId: number }
   | { kind: 'episode'; seriesId: number; season: number; episode: number };
+
+/** Fetch the series' season list and convert (season, episode) to its
+ *  series-wide absolute number. Returns null on any failure — callers treat a
+ *  null as "no absolute fallback available". */
+async function absoluteOfSeasonEpisode(
+  tmdbId: number,
+  season: number,
+  episode: number,
+  getSeries: typeof tmdb.getSeries,
+): Promise<number | null> {
+  try {
+    const s = await getSeries(tmdbId);
+    const known = s.seasons
+      ? s.seasons.map((sn) => ({ season_number: sn.season_number, episode_count: sn.episode_count }))
+      : null;
+    return absoluteOfSe(season, episode, known);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Persist an identified file into `media_items` (movies) or `media_items` + `episodes` (series).
@@ -267,10 +291,26 @@ async function applySeriesEpisode(
   let epOverview: string | null = null;
   let epStill: string | null = null;
   let epRuntimeSeconds: number | null = null;
+  // Persisted only when this show is absolute-numbered (the per-season lookup
+  // missed but the absolute one hit) — drives the absolute episode LABEL in the
+  // UI. Stays null for normally-numbered shows.
+  let epAbsolute: number | null = opts.absolute ?? null;
   if (deps.tmdb?.getEpisodes) {
     try {
       const seasonData = await deps.tmdb.getEpisodes(identity.tmdbId, season);
-      const e = seasonData.episodes.find((x) => x.episode_number === episode);
+      let e = seasonData.episodes.find((x) => x.episode_number === episode);
+      // Absolute-numbering fallback: some shows label a season's TMDB episodes
+      // with the SERIES-WIDE number (Naruto S2 = episode_number 53–104, not
+      // 1–52). When the per-season lookup misses, convert (season, episode) to
+      // its absolute position via the season list and retry, so the title/still
+      // are still found. See absoluteOfSeasonEpisode().
+      if (!e && deps.tmdb.getSeries) {
+        const abs = await absoluteOfSeasonEpisode(identity.tmdbId, season, episode, deps.tmdb.getSeries);
+        if (abs != null) {
+          e = seasonData.episodes.find((x) => x.episode_number === abs);
+          if (e && epAbsolute == null) epAbsolute = abs;
+        }
+      }
       if (e) {
         epTitle = e.name ?? null;
         epOverview = e.overview ?? null;
@@ -289,6 +329,7 @@ async function applySeriesEpisode(
     path: relPosix,
     season,
     episode,
+    absolute_number: epAbsolute,
     title: epTitle,
     overview: epOverview,
     still_url: epStill,

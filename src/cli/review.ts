@@ -14,6 +14,7 @@ import {
   candidatesToViews,
   resolveAction,
   parseSeInput,
+  absoluteToSe,
   extractSeFromPath,
   applyChoice,
   formatCandidateLine,
@@ -126,14 +127,26 @@ async function main(): Promise<number> {
         season = extracted.season;
         episode = extracted.episode;
       } else {
-        const seAns = await rl.question('  which season and episode? [s4e2 / 4x2 / etc] > ');
+        const seAns = await rl.question('  which season and episode? [s4e2 / 4x2 / absolute 220 / etc] > ');
         const parsedSe = parseSeInput(seAns);
         if (!parsedSe) {
           console.log('  x couldn\'t parse season/episode; skipping.\n');
           continue;
         }
-        season = parsedSe.season;
-        episode = parsedSe.episode;
+        if ('absolute' in parsedSe) {
+          // Absolute (series-wide) numbering — map against the show's season list.
+          const series = await tmdbApi.getSeries(resolved.identity.tmdbId);
+          const mapped = absoluteToSe(parsedSe.absolute, series.seasons);
+          if (!mapped) {
+            console.log('  x absolute episode number is past the end of this series; skipping.\n');
+            continue;
+          }
+          season = mapped.season;
+          episode = mapped.episode;
+        } else {
+          season = parsedSe.season;
+          episode = parsedSe.episode;
+        }
       }
     }
 

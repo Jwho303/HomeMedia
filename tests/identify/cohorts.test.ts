@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { groupIntoCohorts, identifyCohort, fitFileIntoCohort, type FileEntry, type IdentifyDeps } from '../../src/identify/cohorts.js';
+import { groupIntoCohorts, identifyCohort, fitFileIntoCohort, cohortIsAbsoluteNumbered, type FileEntry, type IdentifyDeps } from '../../src/identify/cohorts.js';
 import type { Source } from '../../src/identify/sources.js';
 import type { SourceResult } from '../../src/identify/types.js';
 
@@ -288,5 +288,75 @@ describe('fitFileIntoCohort', () => {
     const ep1 = fits.find((f) => f.kind === 'episode' && f.episode === 1);
     expect(phila).toBeDefined();
     expect(ep1).toBeDefined();
+  });
+
+  it('absolute-numbered anime cohort maps each file across seasons', async () => {
+    const source: Source = makeSource(() => []);
+    // Real Naruto rip shape: files live under disk "Season N" folders but the
+    // filenames carry TMDB's ABSOLUTE episode labels (001–220) plus a title.
+    const cohort = groupIntoCohorts([
+      f('all seasons of naruto/Season 1/Naruto  001 - Enter Naruto Uzumaki.mkv'),
+      f('all seasons of naruto/Season 2/Naruto  053 - Long Time No See, Jiraiya Returns.mkv'),
+      f('all seasons of naruto/Season 2/Naruto  104 - Run Idate Run.mkv'),
+      f('all seasons of naruto/Season 3/Naruto  130 - A Fierce Battle.mkv'),
+      f('all seasons of naruto/Season 4/Naruto  220 - Departure.mkv'),
+    ])[0]!;
+
+    const identity = {
+      tmdbId: 46260,
+      type: 'series' as const,
+      title: 'Naruto',
+      year: 2002,
+      posterPath: null,
+      backdropPath: null,
+      overview: null,
+      confidence: 0.95,
+      source: 'cohort-folder' as const,
+    };
+
+    // Real TMDB Naruto season counts: 52, 52, 54, 62 (+ 2 specials).
+    const known = [
+      { season_number: 0, episode_count: 2 },
+      { season_number: 1, episode_count: 52 },
+      { season_number: 2, episode_count: 52 },
+      { season_number: 3, episode_count: 54 },
+      { season_number: 4, episode_count: 62 },
+    ];
+    const deps: IdentifyDeps = { source, getKnownSeasons: async () => known };
+
+    const fit = async (relPosix: string): Promise<unknown> => {
+      const file = cohort.files.find((x) => x.relPosix === relPosix)!;
+      return fitFileIntoCohort(file, cohort, identity, deps);
+    };
+
+    // 001 → S1E1; 053 → first ep of S2 (52 in S1) → S2E1; 104 → S2E52;
+    // 130 → S3E26 (52+52=104); 220 → S4E62 (the finale). The fit also carries
+    // the absolute number so episode-metadata lookup can fall back to it.
+    expect(await fit('all seasons of naruto/Season 1/Naruto  001 - Enter Naruto Uzumaki.mkv')).toMatchObject({ kind: 'episode', season: 1, episode: 1, absolute: 1 });
+    expect(await fit('all seasons of naruto/Season 2/Naruto  053 - Long Time No See, Jiraiya Returns.mkv')).toMatchObject({ kind: 'episode', season: 2, episode: 1, absolute: 53 });
+    expect(await fit('all seasons of naruto/Season 2/Naruto  104 - Run Idate Run.mkv')).toMatchObject({ kind: 'episode', season: 2, episode: 52, absolute: 104 });
+    expect(await fit('all seasons of naruto/Season 3/Naruto  130 - A Fierce Battle.mkv')).toMatchObject({ kind: 'episode', season: 3, episode: 26, absolute: 130 });
+    expect(await fit('all seasons of naruto/Season 4/Naruto  220 - Departure.mkv')).toMatchObject({ kind: 'episode', season: 4, episode: 62, absolute: 220 });
+  });
+
+  it('does NOT treat a normal multi-season show numbered within season 1 as absolute', () => {
+    // 12 files "01".."12", all inside season 1's 24-episode count → relative, not absolute.
+    const cohort = groupIntoCohorts(
+      Array.from({ length: 12 }, (_, i) => f(`Show/Season 1/Show ${String(i + 1).padStart(2, '0')}.mkv`)),
+    )[0]!;
+    const known = [
+      { season_number: 1, episode_count: 24 },
+      { season_number: 2, episode_count: 24 },
+    ];
+    expect(cohortIsAbsoluteNumbered(cohort, 'Show', known)).toBe(false);
+  });
+
+  it('does not treat a single-season show as absolute', () => {
+    const cohort = groupIntoCohorts([
+      f('Show/Show 01.mkv'),
+      f('Show/Show 02.mkv'),
+    ])[0]!;
+    const known = [{ season_number: 1, episode_count: 12 }];
+    expect(cohortIsAbsoluteNumbered(cohort, 'Show', known)).toBe(false);
   });
 });

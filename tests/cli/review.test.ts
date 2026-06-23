@@ -11,6 +11,7 @@ const { openDb } = await import('../../src/db.js');
 const {
   parseAction,
   parseSeInput,
+  absoluteToSe,
   candidatesToViews,
   resolveAction,
   applyChoice,
@@ -64,6 +65,46 @@ describe('parseSeInput', () => {
 
   it('rejects unrecognized formats', () => {
     expect(parseSeInput('what')).toBeNull();
+    expect(parseSeInput('')).toBeNull();
+    expect(parseSeInput('0')).toBeNull(); // absolute episode 0 is meaningless
+  });
+
+  it('reads a bare number, E###, or #### as an absolute episode', () => {
+    expect(parseSeInput('220')).toEqual({ absolute: 220 });
+    expect(parseSeInput('E220')).toEqual({ absolute: 220 });
+    expect(parseSeInput('#220')).toEqual({ absolute: 220 });
+    expect(parseSeInput('001')).toEqual({ absolute: 1 });
+  });
+
+  it('still prefers season+episode forms over the absolute fallback', () => {
+    // "4x2" must not be misread as the bare number "42".
+    expect(parseSeInput('4x2')).toEqual({ season: 4, episode: 2 });
+  });
+});
+
+describe('absoluteToSe', () => {
+  // Naruto-shaped: seasons of 57, 43, 21, 99 episodes (+ a specials season 0).
+  const seasons = [
+    { season_number: 0, episode_count: 12 },
+    { season_number: 1, episode_count: 57 },
+    { season_number: 2, episode_count: 43 },
+    { season_number: 3, episode_count: 21 },
+    { season_number: 4, episode_count: 99 },
+  ];
+
+  it('maps an absolute number into the right season, ignoring specials', () => {
+    expect(absoluteToSe(1, seasons)).toEqual({ season: 1, episode: 1 });
+    expect(absoluteToSe(57, seasons)).toEqual({ season: 1, episode: 57 });
+    expect(absoluteToSe(58, seasons)).toEqual({ season: 2, episode: 1 });
+    expect(absoluteToSe(101, seasons)).toEqual({ season: 3, episode: 1 });
+    expect(absoluteToSe(220, seasons)).toEqual({ season: 4, episode: 99 });
+  });
+
+  it('returns null past the last episode or with no season list', () => {
+    expect(absoluteToSe(221, seasons)).toBeNull();
+    expect(absoluteToSe(1, [])).toBeNull();
+    expect(absoluteToSe(1, null)).toBeNull();
+    expect(absoluteToSe(0, seasons)).toBeNull();
   });
 });
 
@@ -147,6 +188,44 @@ describe('resolveAction (network-free paths)', () => {
     expect(r!.identity.tmdbId).toBe(121);
     expect(r!.identity.imdbId).toBe('tt0167261');
     expect(r!.reason).toBe('tmdb-link');
+  });
+
+  it('tmdb with type:series resolves via getSeries ONLY, never probing getMovie (per-type id collision)', async () => {
+    // movie/323411 = "Theodora", tv/323411 = "The Vampire Lestat". Picking the
+    // series must fetch the series and never touch getMovie.
+    const getMovie = vi.fn(async () => ({ id: 323411, title: 'Theodora', release_date: '1996-01-01', overview: '' }));
+    const tmdb = {
+      getMovie,
+      getSeries: vi.fn(async () => ({ id: 323411, name: 'The Vampire Lestat', first_air_date: '2026-01-01', overview: '' })),
+      getSeriesExternalIds: vi.fn(async () => ({ imdb_id: null, tvdb_id: null })),
+    };
+    const r = await resolveAction({ kind: 'tmdb', id: 323411, type: 'series' }, {
+      row: { path: 'foo.mkv', reason: 'low_score', candidates: '[]', added_at: 1, scanned_at: 1 },
+      views: [],
+      sources: { tmdb: { name: 'tmdb', search: async () => [] } },
+      tmdb: tmdb as never,
+    });
+    expect(r).not.toBeNull();
+    expect(r!.identity.type).toBe('series');
+    expect(r!.identity.title).toBe('The Vampire Lestat');
+    expect(getMovie).not.toHaveBeenCalled();
+  });
+
+  it('tmdb with type:series and a failing getSeries returns null (no fallback to movie)', async () => {
+    const getMovie = vi.fn(async () => ({ id: 5, title: 'Some Movie', release_date: '2000-01-01', overview: '' }));
+    const tmdb = {
+      getMovie,
+      getSeries: vi.fn(async () => { throw new Error('404'); }),
+      getSeriesExternalIds: vi.fn(async () => ({ imdb_id: null, tvdb_id: null })),
+    };
+    const r = await resolveAction({ kind: 'tmdb', id: 5, type: 'series' }, {
+      row: { path: 'foo.mkv', reason: 'low_score', candidates: '[]', added_at: 1, scanned_at: 1 },
+      views: [],
+      sources: { tmdb: { name: 'tmdb', search: async () => [] } },
+      tmdb: tmdb as never,
+    });
+    expect(r).toBeNull();
+    expect(getMovie).not.toHaveBeenCalled();
   });
 
   it('tvdb: walks tvdb→imdb→tmdb when the candidate has both ids', async () => {

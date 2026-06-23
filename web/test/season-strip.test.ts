@@ -7,6 +7,7 @@ import {
   pickBadgeRuntime,
   computePageCount,
   pageFromScroll,
+  episodeLabel,
 } from '../src/components/season-strip.js';
 import type { Episode } from '../src/types.js';
 
@@ -21,6 +22,7 @@ function ep(
     episode: num,
     title: `Ep ${num}`,
     overview: null,
+    absoluteNumber: null,
     stillUrl: null,
     runtimeSeconds: null,
     position: 0,
@@ -30,6 +32,19 @@ function ep(
     ...opts,
   };
 }
+
+describe('episodeLabel', () => {
+  it('uses the per-season number, zero-padded to 2, when not absolute', () => {
+    expect(episodeLabel({ episode: 7, absoluteNumber: null })).toBe('07');
+    expect(episodeLabel({ episode: 12, absoluteNumber: null })).toBe('12');
+  });
+
+  it('prefers the absolute number, zero-padded to 3, when present', () => {
+    // Naruto S2E1 is absolute 53 → shows "053", not "01".
+    expect(episodeLabel({ episode: 1, absoluteNumber: 53 })).toBe('053');
+    expect(episodeLabel({ episode: 62, absoluteNumber: 220 })).toBe('220');
+  });
+});
 
 describe('pickHero', () => {
   it('returns null + allWatched for an empty array', () => {

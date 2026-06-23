@@ -94,6 +94,8 @@ export interface EpisodeRow {
   path: string;
   season: number;
   episode: number;
+  /** Series-wide number for absolute-numbered shows; null otherwise. */
+  absolute_number: number | null;
   title: string | null;
   overview: string | null;
   still_url: string | null;
@@ -166,6 +168,8 @@ export interface UpsertEpisodeInput {
   path: string;
   season: number;
   episode: number;
+  /** Series-wide number for absolute-numbered shows; null otherwise. */
+  absolute_number?: number | null;
   title: string | null;
   overview: string | null;
   still_url: string | null;
@@ -393,6 +397,10 @@ export function openDb(dbPath: string): DbHandle {
   // 0.1.8 IMDb rating cache from OMDb.
   ensureColumn(db, 'media_items', 'imdb_rating', 'REAL');
   ensureColumn(db, 'media_items', 'imdb_votes', 'INTEGER');
+  // Absolute (series-wide) episode number for shows numbered straight through
+  // all seasons (e.g. Naruto). NULL for normally-numbered shows; when present
+  // the UI labels the episode with it instead of the per-season number.
+  ensureColumn(db, 'episodes', 'absolute_number', 'INTEGER');
   // 0.1.10 soft-delete tombstones. Default NULL on existing rows = "alive".
   ensureColumn(db, 'media_items', 'deleted_at', 'INTEGER');
   ensureColumn(db, 'episodes', 'deleted_at', 'INTEGER');
@@ -460,12 +468,13 @@ export function openDb(dbPath: string): DbHandle {
     `),
 
     upsertEpisode: db.prepare<UpsertEpisodeInput, EpisodeRow>(`
-      INSERT INTO episodes (series_id, path, season, episode, title, overview, still_url, confidence, identification_json, runtime_seconds, mtime, scanned_at)
-      VALUES (@series_id, @path, @season, @episode, @title, @overview, @still_url, @confidence, @identification_json, @runtime_seconds, @mtime, @scanned_at)
+      INSERT INTO episodes (series_id, path, season, episode, absolute_number, title, overview, still_url, confidence, identification_json, runtime_seconds, mtime, scanned_at)
+      VALUES (@series_id, @path, @season, @episode, @absolute_number, @title, @overview, @still_url, @confidence, @identification_json, @runtime_seconds, @mtime, @scanned_at)
       ON CONFLICT(path) DO UPDATE SET
         series_id           = excluded.series_id,
         season              = excluded.season,
         episode             = excluded.episode,
+        absolute_number     = excluded.absolute_number,
         title               = excluded.title,
         overview            = excluded.overview,
         still_url           = excluded.still_url,
@@ -865,6 +874,7 @@ export function openDb(dbPath: string): DbHandle {
     upsertEpisode: (input) => {
       const row = stmts.upsertEpisode.get({
         ...input,
+        absolute_number: input.absolute_number ?? null,
         confidence: input.confidence ?? null,
         identification_json: input.identification_json ?? null,
         runtime_seconds: input.runtime_seconds ?? null,

@@ -318,6 +318,32 @@ export class PosterStrip extends LitElement {
     );
   }
 
+  /** Eject a misclassified movie back to the Uncategorized view. <home-view>
+   *  catches this, confirms, calls the eject API, and navigates to the list. */
+  private dispatchEjectItem(item: HomeCardItem): void {
+    this.dispatchEvent(
+      new CustomEvent('eject-item-request', {
+        detail: { id: item.id, title: item.title },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /** Re-import a series: drop its local data and rescan so its files are
+   *  re-identified from scratch (e.g. a show whose episodes were mis-placed,
+   *  like absolute-numbered anime). <home-view> confirms, ejects, then triggers
+   *  a smart refresh. */
+  private dispatchReimportItem(item: HomeCardItem): void {
+    this.dispatchEvent(
+      new CustomEvent('reimport-series-request', {
+        detail: { id: item.id, title: item.title },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   override render(): unknown {
     return html`
       <div class="strip-header">
@@ -367,6 +393,17 @@ export class PosterStrip extends LitElement {
             .extraItems=${[
               { label: 'Re-probe', disabled: this.jobActive, onClick: (): void => this.dispatchReprobeItem(item) },
               { label: 'Identify manually…', disabled: this.jobActive, onClick: (): void => this.dispatchManualIdentifyItem(item) },
+              // Movies only: escape hatch for a file wrongly gated as a movie
+              // (e.g. a series episode). Returns it to the Uncategorized view.
+              ...(item.type === 'movie'
+                ? [{ label: 'Not a movie? Move to Uncategorized', disabled: this.jobActive, onClick: (): void => this.dispatchEjectItem(item) }]
+                : []),
+              // Series only: drop local data and rescan to re-identify episodes
+              // from scratch (fixes mis-placed episodes, e.g. absolute-numbered
+              // anime that landed in the wrong seasons).
+              ...(item.type === 'series'
+                ? [{ label: 'Re-import (rescan files)', disabled: this.jobActive, onClick: (): void => this.dispatchReimportItem(item) }]
+                : []),
             ]}
             @click=${(e: Event): void => e.stopPropagation()}
             @watched-change=${(e: CustomEvent<{ watched: boolean }>): void => this.onWatchedChange(item, e)}
