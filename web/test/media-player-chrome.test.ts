@@ -209,6 +209,34 @@ describe('media-player chrome / popover state', () => {
     expect(v2.volume).toBeCloseTo(0.3);
     document.body.removeChild(p);
   });
+
+  // 0.2.0 — old iPad native HLS: Safari fires `waiting` but often not the
+  // paired `playing`/`canplay`, so the spinner would stick on during smooth
+  // playback. An advancing currentTime in `timeupdate` must clear it.
+  it('a stuck buffering spinner clears once the play head advances', async () => {
+    const p = await mount();
+    const inner = p as unknown as {
+      buffering: boolean;
+      seeking: boolean;
+      pendingSeek: number | null;
+      onTimeUpdate: () => void;
+    };
+    const video = p.shadowRoot!.querySelector('video') as HTMLVideoElement;
+
+    // Simulate the stuck state: waiting fired, playing/canplay never did.
+    video.dispatchEvent(new Event('waiting'));
+    expect(inner.buffering).toBe(true);
+
+    // Play head is advancing and we're not paused/seeking.
+    Object.defineProperty(video, 'paused', { value: false, configurable: true });
+    Object.defineProperty(video, 'currentTime', { value: 4.2, configurable: true });
+    inner.seeking = false;
+    inner.pendingSeek = null;
+    inner.onTimeUpdate();
+
+    expect(inner.buffering).toBe(false);
+    document.body.removeChild(p);
+  });
 });
 
 describe('title formatting helpers', () => {

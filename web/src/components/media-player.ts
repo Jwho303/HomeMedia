@@ -933,6 +933,10 @@ export class MediaPlayer extends LitElement {
    *  hides the spinner until 200ms have elapsed so a 50ms stall doesn't
    *  flash a spinner. */
   @state() private bufferingSince = 0;
+  /** Last `currentTime` seen in `timeupdate`. Used to detect a still-advancing
+   *  play head so the spinner can be cleared even when Safari skips the
+   *  `playing`/`canplay` event (old iPad native HLS). Not reactive. */
+  private lastTimeUpdateCT = -1;
   @state() private error: string | null = null;
   @state() private nativeControls = false;
   @state() private probe: StreamProbe | null = null;
@@ -1609,6 +1613,23 @@ export class MediaPlayer extends LitElement {
     const v = this.videoEl;
     if (!v || !this.persister) return;
     const absolute = this.absoluteTime(v);
+    // 0.2.0 — spinner safety net for native-HLS Safari (old iPads especially).
+    // Old WebKit fires `waiting` but often never the paired `playing`/`canplay`,
+    // so the buffering flag — and the spinner — would stick on forever during
+    // smooth playback. A monotonically advancing currentTime (while not paused
+    // or mid-seek) is proof we're playing, regardless of which events fired; use
+    // it to clear the spinner that the event handlers missed.
+    if (
+      this.buffering &&
+      !this.seeking &&
+      this.pendingSeek === null &&
+      !v.paused &&
+      v.currentTime !== this.lastTimeUpdateCT
+    ) {
+      this.buffering = false;
+      this.bufferingSince = 0;
+    }
+    this.lastTimeUpdateCT = v.currentTime;
     if (this.pendingSeek === null) {
       this.currentTime = absolute;
     }
