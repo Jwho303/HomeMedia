@@ -107,3 +107,46 @@ CREATE TABLE IF NOT EXISTS manual_overrides (
   reason      TEXT NOT NULL,                   -- 'manual' | 'imdb-link' | 'retitled-search' | 'tvdb-link' | 'tmdb-link'
   decided_at  INTEGER NOT NULL
 );
+
+-- 0.2.1 — Skip intro / credits. Raw audio fingerprints of each episode's head
+-- and tail windows. Kept out of `episodes` so `SELECT e.*` never drags BLOBs
+-- into API responses. `mtime` is the file mtime when fingerprinted; a changed
+-- file is fingerprinted again. Rows exist even when capture failed (NULL
+-- fingerprints) so a file with no audio isn't retried every sweep.
+CREATE TABLE IF NOT EXISTS episode_fingerprints (
+  episode_id     INTEGER PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+  mtime          INTEGER NOT NULL,
+  version        INTEGER NOT NULL,
+  head_fp        BLOB,
+  tail_fp        BLOB,
+  tail_offset_s  REAL,
+  created_at     INTEGER NOT NULL
+);
+
+-- One row per learned theme song (a show can have many).
+CREATE TABLE IF NOT EXISTS theme_fingerprints (
+  id            INTEGER PRIMARY KEY,
+  series_id     INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('opening','ending')),
+  fingerprint   BLOB NOT NULL,
+  duration_s    REAL NOT NULL,
+  learned_from  INTEGER REFERENCES episodes(id) ON DELETE SET NULL,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_theme_fp_series ON theme_fingerprints(series_id, kind);
+
+-- Which theme songs a season uses (many-to-many).
+CREATE TABLE IF NOT EXISTS season_themes (
+  series_id      INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+  season         INTEGER NOT NULL,
+  fingerprint_id INTEGER NOT NULL REFERENCES theme_fingerprints(id) ON DELETE CASCADE,
+  PRIMARY KEY (series_id, season, fingerprint_id)
+);
+
+-- Per-show viewer preference: auto-skip intro and/or credits.
+CREATE TABLE IF NOT EXISTS series_skip_prefs (
+  series_id     INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+  auto_intro    INTEGER NOT NULL DEFAULT 0,
+  auto_credits  INTEGER NOT NULL DEFAULT 0,
+  updated_at    INTEGER NOT NULL
+);

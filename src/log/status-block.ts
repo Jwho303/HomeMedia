@@ -44,6 +44,8 @@ export interface StatusSnapshot {
   shareOnline: boolean | null;
   /** Whether a scan is running. */
   scanning: boolean;
+  /** 0.2.1 — skip intro/credits background progress, e.g. "intros 201/1012 Archer S02E02". */
+  themes?: string | null;
 }
 
 const RECENT_MS = 5 * 60_000;
@@ -98,7 +100,7 @@ export function renderLines(s: StatusSnapshot, now: number): string[] {
       : 'share offline';
   const hls = s.liveHls === 1 ? '1 HLS session' : `${s.liveHls} HLS sessions`;
   const clients = s.clients === 1 ? '1 client' : `${s.clients} clients`;
-  const live = `live: ${clients} · ${hls} · ${shareTxt}${s.scanning ? ' · scanning' : ''}`;
+  const live = `live: ${clients} · ${hls} · ${shareTxt}${s.scanning ? ' · scanning' : ''}${s.themes ? ` · ${s.themes}` : ''}`;
   return [head, encLine, live];
 }
 
@@ -124,6 +126,7 @@ export class StatusBlock {
   private encoders: StatusSnapshot['encoders'] = null;
   private shareOnline: boolean | null = null;
   private scanning = false;
+  private themes: string | null = null;
   /** map remoteAddress → last-seen ms */
   private readonly clientsLastSeen: Map<string, number> = new Map();
   /** Reference to the transport so render() can read liveHls. */
@@ -206,6 +209,7 @@ export class StatusBlock {
       clients: active,
       shareOnline: this.shareOnline,
       scanning: this.scanning,
+      themes: this.themes,
     };
   }
 
@@ -219,6 +223,13 @@ export class StatusBlock {
   /** Update encoder caps once `detectEncoders()` resolves. */
   setEncoders(caps: { nvenc: boolean; qsv: boolean; videotoolbox: boolean }): void {
     this.encoders = caps;
+    this.render();
+  }
+
+  /** 0.2.1 — show (or clear, with null) skip intro/credits progress on the live line. */
+  setThemes(text: string | null): void {
+    if (this.themes === text) return;
+    this.themes = text;
     this.render();
   }
 

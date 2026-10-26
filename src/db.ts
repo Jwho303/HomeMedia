@@ -55,6 +55,9 @@ export interface MediaItemWithPlayback {
   playback: ItemPlaybackAggregate;
 }
 
+/** Continue Watching drops anything not played in this long. */
+export const CONTINUE_STALE_MS = 14 * 24 * 60 * 60 * 1000;
+
 /** One row in `GET /api/continue`. (0.1.3.2) */
 export interface ContinueRow {
   type: 'movie' | 'series';
@@ -107,6 +110,13 @@ export interface EpisodeRow {
   scanned_at: number;
   /** 0.1.10 — soft-delete tombstone. NULL means "alive". */
   deleted_at?: number | null;
+  /** 0.2.1 — skip markers, seconds from file start. NULL when not found. */
+  intro_start?: number | null;
+  intro_end?: number | null;
+  credits_start?: number | null;
+  credits_end?: number | null;
+  /** 0.2.1 — theme pass version that produced the markers; NULL = not processed. */
+  markers_version?: number | null;
 }
 
 /** Episode joined with optional playback_state row, returned by getSeries (0.1.3.1). */
@@ -308,7 +318,8 @@ export interface DbHandle {
   /** Like `listLibrary` but each row carries a per-item playback aggregate. (0.1.3.2) */
   listLibraryWithPlayback(opts?: { includeStale?: boolean }): MediaItemWithPlayback[];
   /** In-progress items, mixed movies + series, ordered by recency. (0.1.3.2) */
-  getContinueWatching(limit?: number): ContinueRow[];
+  /** `since` (epoch ms): items last played before this are stale. Defaults to 14 days ago. */
+  getContinueWatching(limit?: number, since?: number): ContinueRow[];
   /** 0.1.10 — `MAX(scan_runs.finished_at WHERE status='ok')` (or 0). Replaces
    *  the legacy `MAX(media_items.scanned_at)` freshness reference. */
   latestRunAt(): number;
@@ -406,6 +417,12 @@ export function openDb(dbPath: string): DbHandle {
   ensureColumn(db, 'episodes', 'deleted_at', 'INTEGER');
   ensureColumn(db, 'media_files', 'deleted_at', 'INTEGER');
   ensureColumn(db, 'needs_review', 'deleted_at', 'INTEGER');
+  // 0.2.1 skip intro / credits markers (seconds from file start; NULL = none).
+  ensureColumn(db, 'episodes', 'intro_start', 'REAL');
+  ensureColumn(db, 'episodes', 'intro_end', 'REAL');
+  ensureColumn(db, 'episodes', 'credits_start', 'REAL');
+  ensureColumn(db, 'episodes', 'credits_end', 'REAL');
+  ensureColumn(db, 'episodes', 'markers_version', 'INTEGER');
   db.exec(`CREATE INDEX IF NOT EXISTS idx_media_items_deleted_at ON media_items(deleted_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_episodes_deleted_at    ON episodes(deleted_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_media_files_deleted_at ON media_files(deleted_at)`);
@@ -703,13 +720,15 @@ export function openDb(dbPath: string): DbHandle {
      * Continue Watching — unified, recency-ordered list of in-progress items.
      *
      * Movies: an item qualifies iff playback exists AND 0 < position < duration*0.9 AND watched=0.
-     * Series: collapse to one row per series; the resume row is the most-recently-updated
-     *         in-progress episode (same predicate as movies). The series-level title/posterUrl
-     *         comes from the series's media_items row.
-     * Order: lastPlayedAt (i.e. updated_at) DESC. (0.1.3.2)
+     * Series: one row per series, keyed off the most-recently-played episode:
+     *         - still in progress (same predicate as movies) → resume that episode
+     *         - finished (watched or >=90%) → the next unwatched episode after it,
+     *           or drop the series if there is none.
+     * Anything last played before @since is stale and dropped.
+     * Order: lastPlayedAt (i.e. updated_at) DESC.
      */
     continueWatching: db.prepare<
-      [number],
+      { since: number; limit: number },
       {
         type: 'movie' | 'series';
         item_id: number;
@@ -740,47 +759,75 @@ export function openDb(dbPath: string): DbHandle {
         JOIN playback_state ps ON ps.path = mi.path
         WHERE mi.type = 'movie'
           AND mi.deleted_at IS NULL
+          AND ps.updated_at >= @since
           AND ps.watched = 0
           AND ps.duration_seconds > 0
           AND ps.position_seconds > 0
           AND ps.position_seconds < ps.duration_seconds * 0.9
       ),
-      series_eps AS (
+      series_last AS (
         SELECT mi.id                  AS item_id,
                mi.title               AS title,
                mi.poster_url          AS poster_url,
-               e.path                 AS resume_path,
-               ps.position_seconds    AS position,
-               ps.duration_seconds    AS duration,
-               e.runtime_seconds      AS runtime_seconds,
+               e.path                 AS path,
                e.season               AS season,
                e.episode              AS episode,
-               ps.updated_at          AS last_played_at
+               e.runtime_seconds      AS runtime_seconds,
+               ps.position_seconds    AS pos,
+               ps.duration_seconds    AS dur,
+               ps.watched             AS watched,
+               ps.updated_at          AS last_played_at,
+               ROW_NUMBER() OVER (
+                 PARTITION BY mi.id
+                 ORDER BY ps.updated_at DESC, e.season DESC, e.episode DESC
+               ) AS rn
         FROM media_items mi
         JOIN episodes e ON e.series_id = mi.id
         JOIN playback_state ps ON ps.path = e.path
         WHERE mi.type = 'series'
           AND mi.deleted_at IS NULL
           AND e.deleted_at IS NULL
-          AND ps.watched = 0
-          AND ps.duration_seconds > 0
-          AND ps.position_seconds > 0
-          AND ps.position_seconds < ps.duration_seconds * 0.9
+          AND ps.updated_at >= @since
       ),
       series_rows AS (
-        SELECT 'series' AS type, se.*
-        FROM series_eps se
-        WHERE se.last_played_at = (
-          SELECT MAX(se2.last_played_at)
-          FROM series_eps se2
-          WHERE se2.item_id = se.item_id
+        -- Latest episode still in progress: resume it.
+        SELECT 'series' AS type, sl.item_id, sl.title, sl.poster_url,
+               sl.path AS resume_path, sl.pos AS position, sl.dur AS duration,
+               sl.runtime_seconds, sl.season, sl.episode, sl.last_played_at
+        FROM series_last sl
+        WHERE sl.rn = 1
+          AND sl.watched = 0
+          AND sl.dur > 0
+          AND sl.pos > 0
+          AND sl.pos < sl.dur * 0.9
+        UNION ALL
+        -- Latest episode finished: point at the next unwatched one.
+        SELECT 'series' AS type, sl.item_id, sl.title, sl.poster_url,
+               n.path AS resume_path,
+               COALESCE(nps.position_seconds, 0) AS position,
+               COALESCE(nps.duration_seconds, 0) AS duration,
+               n.runtime_seconds, n.season, n.episode, sl.last_played_at
+        FROM series_last sl
+        JOIN episodes n ON n.id = (
+          SELECT n2.id
+          FROM episodes n2
+          LEFT JOIN playback_state p2 ON p2.path = n2.path
+          WHERE n2.series_id = sl.item_id
+            AND n2.deleted_at IS NULL
+            AND COALESCE(p2.watched, 0) = 0
+            AND (n2.season > sl.season OR (n2.season = sl.season AND n2.episode > sl.episode))
+          ORDER BY n2.season ASC, n2.episode ASC
+          LIMIT 1
         )
+        LEFT JOIN playback_state nps ON nps.path = n.path
+        WHERE sl.rn = 1
+          AND (sl.watched = 1 OR (sl.dur > 0 AND sl.pos >= sl.dur * 0.9))
       )
       SELECT * FROM movie_rows
       UNION ALL
       SELECT * FROM series_rows
       ORDER BY last_played_at DESC
-      LIMIT ?
+      LIMIT @limit
     `),
 
     getOverride: db.prepare<[string], ManualOverrideRow>(
@@ -1031,8 +1078,8 @@ export function openDb(dbPath: string): DbHandle {
         return { item: itemRow as MediaItemRow, playback };
       });
     },
-    getContinueWatching: (limit = 25) => {
-      const rows = stmts.continueWatching.all(limit);
+    getContinueWatching: (limit = 25, since = Date.now() - CONTINUE_STALE_MS) => {
+      const rows = stmts.continueWatching.all({ since, limit });
       return rows.map((r) => {
         const resumeLabel: string | null =
           r.type === 'series' && r.season != null && r.episode != null
@@ -1094,13 +1141,16 @@ export function openDb(dbPath: string): DbHandle {
       // media_items, so the deletes don't depend on ON DELETE CASCADE firing.
       // 'all' additionally clears the user-owned tables.
       const libraryTables = [
+        'episode_fingerprints',
+        'season_themes',
+        'theme_fingerprints',
         'media_files',
         'episodes',
         'needs_review',
         'media_items',
         'scan_runs',
       ];
-      const userTables = ['manual_overrides', 'playback_state'];
+      const userTables = ['manual_overrides', 'playback_state', 'series_skip_prefs'];
       const tables = scope === 'all' ? [...libraryTables, ...userTables] : libraryTables;
       const counts: Record<string, number> = {};
       const run = db.transaction(() => {

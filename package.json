@@ -9,6 +9,7 @@
   "scripts": {
     "scan": "tsx src/cli/scan.ts",
     "review": "tsx src/cli/review.ts",
+    "themes": "tsx src/cli/themes.ts",
     "dev": "tsx watch src/server.ts",
     "dev:all": "concurrently -n api,web -c blue,magenta \"npm run dev\" \"npm --prefix web run dev\"",
     "start": "tsx src/server.ts",

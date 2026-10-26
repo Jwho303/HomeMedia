@@ -659,7 +659,7 @@ describe('db', () => {
     db.upsertPlayback({ path: 'A.mkv', position: 600, duration: 1500, updated_at: 1000 });
     db.upsertPlayback({ path: 'B.mkv', position: 1430, duration: 1500, updated_at: 2000, watched: true });
 
-    const out = db.getContinueWatching();
+    const out = db.getContinueWatching(25, 0);
     expect(out.map((r) => r.title)).toEqual(['A']);
     expect(out[0]!.position).toBe(600);
     expect(out[0]!.duration).toBe(1500);
@@ -668,27 +668,52 @@ describe('db', () => {
     expect(out[0]!.resumeLabel).toBeNull();
   });
 
-  it('getContinueWatching: series collapses to most-recent in-progress episode per series (0.1.3.2)', () => {
+  it('getContinueWatching: series resumes the most-recently-played episode when in progress', () => {
     const s = db.upsertItem({
       path: 'Show', type: 'series', tmdb_id: 99, title: 'Show', year: 2024,
       poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
     });
     db.upsertEpisode({ series_id: s.id, path: 'Show/S01E01.mkv', season: 1, episode: 1, title: '1', overview: null, still_url: null, mtime: 1, scanned_at: 1 });
     db.upsertEpisode({ series_id: s.id, path: 'Show/S01E02.mkv', season: 1, episode: 2, title: '2', overview: null, still_url: null, mtime: 1, scanned_at: 1 });
-    db.upsertEpisode({ series_id: s.id, path: 'Show/S01E03.mkv', season: 1, episode: 3, title: '3', overview: null, still_url: null, mtime: 1, scanned_at: 1 });
-    // E1 in progress at t=1000, E2 in progress at t=2000 (more recent)
     db.upsertPlayback({ path: 'Show/S01E01.mkv', position: 600, duration: 1500, updated_at: 1000 });
     db.upsertPlayback({ path: 'Show/S01E02.mkv', position: 600, duration: 1500, updated_at: 2000 });
-    // E3 watched
-    db.upsertPlayback({ path: 'Show/S01E03.mkv', position: 1500, duration: 1500, updated_at: 3000, watched: true });
 
-    const out = db.getContinueWatching();
+    const out = db.getContinueWatching(25, 0);
     expect(out).toHaveLength(1);
     expect(out[0]!.type).toBe('series');
-    expect(out[0]!.title).toBe('Show');
     expect(out[0]!.resumePath).toBe('Show/S01E02.mkv');
     expect(out[0]!.resumeLabel).toBe('S1 · E2');
     expect(out[0]!.lastPlayedAt).toBe(2000);
+  });
+
+  it('getContinueWatching: finished latest episode points at the next one, not an older in-progress one', () => {
+    const s = db.upsertItem({
+      path: 'Show', type: 'series', tmdb_id: 99, title: 'Show', year: 2024,
+      poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
+    });
+    db.upsertEpisode({ series_id: s.id, path: 'Show/S01E01.mkv', season: 1, episode: 1, title: '1', overview: null, still_url: null, mtime: 1, scanned_at: 1 });
+    db.upsertEpisode({ series_id: s.id, path: 'Show/S01E02.mkv', season: 1, episode: 2, title: '2', overview: null, still_url: null, mtime: 1, scanned_at: 1 });
+    db.upsertEpisode({ series_id: s.id, path: 'Show/S02E01.mkv', season: 2, episode: 1, title: '3', overview: null, still_url: null, mtime: 1, scanned_at: 1 });
+    db.upsertPlayback({ path: 'Show/S01E01.mkv', position: 600, duration: 1500, updated_at: 1000 });
+    db.upsertPlayback({ path: 'Show/S01E02.mkv', position: 1500, duration: 1500, updated_at: 2000, watched: true });
+
+    const out = db.getContinueWatching(25, 0);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.resumePath).toBe('Show/S02E01.mkv');
+    expect(out[0]!.position).toBe(0);
+    expect(out[0]!.lastPlayedAt).toBe(2000);
+
+    // Last episode finished: nothing left, series drops off.
+    db.upsertPlayback({ path: 'Show/S02E01.mkv', position: 1500, duration: 1500, updated_at: 3000, watched: true });
+    expect(db.getContinueWatching(25, 0)).toHaveLength(0);
+  });
+
+  it('getContinueWatching: drops items last played before `since`', () => {
+    db.upsertItem({ path: 'A.mkv', type: 'movie', tmdb_id: 1, title: 'A', year: 2024, poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1 });
+    db.upsertItem({ path: 'B.mkv', type: 'movie', tmdb_id: 2, title: 'B', year: 2024, poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1 });
+    db.upsertPlayback({ path: 'A.mkv', position: 100, duration: 1000, updated_at: 1000 });
+    db.upsertPlayback({ path: 'B.mkv', position: 100, duration: 1000, updated_at: 5000 });
+    expect(db.getContinueWatching(25, 2000).map((r) => r.title)).toEqual(['B']);
   });
 
   it('getContinueWatching: orders by lastPlayedAt DESC and respects limit (0.1.3.2)', () => {
@@ -699,8 +724,8 @@ describe('db', () => {
     db.upsertPlayback({ path: 'B.mkv', position: 100, duration: 1000, updated_at: 2000 });
     db.upsertPlayback({ path: 'C.mkv', position: 100, duration: 1000, updated_at: 3000 });
 
-    expect(db.getContinueWatching().map((r) => r.title)).toEqual(['C', 'B', 'A']);
-    expect(db.getContinueWatching(2).map((r) => r.title)).toEqual(['C', 'B']);
+    expect(db.getContinueWatching(25, 0).map((r) => r.title)).toEqual(['C', 'B', 'A']);
+    expect(db.getContinueWatching(2, 0).map((r) => r.title)).toEqual(['C', 'B']);
   });
 
   it('upsertItem stores confidence + identification_json when provided', () => {

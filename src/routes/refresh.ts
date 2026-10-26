@@ -1,6 +1,9 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { scan as defaultScan, type ScanDeps, type ScanOptions, type ScanResult } from '../scan.js';
 import { tryAcquire, currentJobId } from '../scan-lock.js';
+import { requestSweep } from '../themes/sweep.js';
+import { getDb } from '../db.js';
+import { config } from '../config.js';
 import {
   attach,
   markDone,
@@ -35,6 +38,8 @@ export async function registerRefreshRoutes(app: FastifyInstance): Promise<void>
       .then(
         (result) => {
           markDone(meta.jobId, result);
+          // 0.2.1 — fingerprint new episodes + refresh skip markers in the background.
+          if (!injectedScan) requestSweep({ db: getDb(), mediaRoot: config.mediaRoot, logger: app.log });
         },
         (err: Error) => {
           markError(meta.jobId, err.message ?? 'scan_failed');

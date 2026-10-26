@@ -1,5 +1,7 @@
 import { loadConfig, ConfigError } from '../config.js';
 import { scan, dryRun, refreshRatings, ShareOfflineError } from '../scan.js';
+import { getDb } from '../db.js';
+import { runSweep } from '../themes/sweep.js';
 
 const consoleLogger = {
   info: (msg: string) => console.log(msg),
@@ -121,6 +123,11 @@ async function main(): Promise<number> {
     console.log(
       `${result.scanned} scanned, ${result.added} added, ${result.updated} updated, ${result.stale} stale, ${result.needsReview} needs-review${passBPart}${overridePart}, ${result.errors} errors. ${cfg.dbPath} updated.`,
     );
+    // 0.2.1 — fingerprint new episodes + refresh skip intro/credits markers.
+    const sweep = await runSweep({ db: getDb(), mediaRoot: cfg.mediaRoot });
+    if (sweep.fingerprinted || sweep.series) {
+      console.log(`skip markers: ${sweep.fingerprinted} episodes fingerprinted, ${sweep.series} shows updated, ${sweep.themesLearned} themes learned.`);
+    }
     return result.errors > 0 ? 1 : 0;
   } catch (err) {
     if (err instanceof ShareOfflineError) {

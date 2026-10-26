@@ -5,6 +5,7 @@ import {
   apiManualIdentifyEject,
   apiPathSetWatched,
   apiSeries,
+  apiSetSkipPrefs,
   ShareOfflineError,
 } from '../api.js';
 import { goBack, homeHref, navigate } from '../router.js';
@@ -122,6 +123,8 @@ export class SeriesDetailView extends LitElement {
     }
     .gear-menu button:hover:not(:disabled) { background: var(--surface-pressed); color: var(--text-primary); }
     .gear-menu button:disabled { color: var(--text-disabled); cursor: default; }
+    .gear-divider { height: 1px; background: var(--border-strong); margin: 4px 0; }
+    .gear-menu .tick { display: inline-block; width: 18px; color: var(--accent); }
 
     .body { padding: 16px; }
 
@@ -312,6 +315,21 @@ export class SeriesDetailView extends LitElement {
                     ?disabled=${this.scan.active || this.detail == null}
                     @click=${(): void => void this.onReimportSeries()}
                   >Re-import (rescan files)</button>
+                  ${this.detail?.skipPrefs
+                    ? html`
+                        <div class="gear-divider"></div>
+                        <button
+                          role="menuitemcheckbox"
+                          aria-checked=${this.detail.skipPrefs.autoIntro ? 'true' : 'false'}
+                          @click=${(): void => void this.onToggleSkip('autoIntro')}
+                        ><span class="tick">${this.detail.skipPrefs.autoIntro ? '✓' : ''}</span>Always skip intro</button>
+                        <button
+                          role="menuitemcheckbox"
+                          aria-checked=${this.detail.skipPrefs.autoCredits ? 'true' : 'false'}
+                          @click=${(): void => void this.onToggleSkip('autoCredits')}
+                        ><span class="tick">${this.detail.skipPrefs.autoCredits ? '✓' : ''}</span>Always skip credits</button>
+                      `
+                    : null}
                 </div>`
               : null}
           </div>
@@ -321,6 +339,21 @@ export class SeriesDetailView extends LitElement {
       ${this.loading && !this.detail ? html`<div class="body">Loading…</div>` : null}
       ${this.detail ? this.renderDetail(this.detail) : null}
     `;
+  }
+
+  /** 0.2.1 — flip a per-show auto-skip preference. Optimistic, rolls back on failure. */
+  private async onToggleSkip(key: 'autoIntro' | 'autoCredits'): Promise<void> {
+    const d = this.detail;
+    if (!d?.skipPrefs) return;
+    const prev = d.skipPrefs;
+    this.detail = { ...d, skipPrefs: { ...prev, [key]: !prev[key] } };
+    try {
+      const saved = await apiSetSkipPrefs(d.series.id, { [key]: !prev[key] });
+      if (this.detail) this.detail = { ...this.detail, skipPrefs: saved };
+    } catch {
+      if (this.detail) this.detail = { ...this.detail, skipPrefs: prev };
+      this.error = 'Could not save the skip setting.';
+    }
   }
 
   private renderDetail(d: SeriesDetail): unknown {

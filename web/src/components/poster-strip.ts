@@ -289,6 +289,7 @@ export class PosterStrip extends LitElement {
   }
 
   private onClick(item: HomeCardItem): void {
+    if (item.viaHref) navigate(item.viaHref);
     navigate(item.href);
   }
 

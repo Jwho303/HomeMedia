@@ -80,6 +80,25 @@ export interface Episode {
 export interface SeriesDetail {
   series: LibraryItem;
   episodes: Episode[];
+  /** 0.2.1 — per-show auto-skip. Optional for older servers. */
+  skipPrefs?: SkipPrefs;
+}
+
+/** 0.2.1 — skip intro / credits. */
+export interface SkipPrefs {
+  autoIntro: boolean;
+  autoCredits: boolean;
+}
+
+export interface PlayerOpenSkip {
+  seriesId: number;
+  markers: {
+    introStart: number | null;
+    introEnd: number | null;
+    creditsStart: number | null;
+    creditsEnd: number | null;
+  } | null;
+  prefs: SkipPrefs;
 }
 
 export interface ShareStatus {
@@ -235,6 +254,8 @@ export interface PlayerOpenResponse {
     duration: number;
     watched: boolean;
   };
+  /** 0.2.1 — null for movies; optional for older servers. */
+  skip?: PlayerOpenSkip | null;
 }
 
 /** 0.1.9 — /api/player/:id/seek response. */

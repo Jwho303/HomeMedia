@@ -30,7 +30,8 @@ import {
   type PlayerInstance,
 } from '../player/instance.js';
 import { decideAction } from '../player/seek-decision.js';
-import { buildOpenBundle, type PlayerOpenResponse } from '../player/bundle.js';
+import { buildOpenBundle, type PlayerOpenResponse, type PlayerOpenSkip } from '../player/bundle.js';
+import { getMarkersByPath, getSkipPrefs } from '../themes/store.js';
 import { getIdentityResolver, type Identity } from '../identity/resolver.js';
 import { PaceController } from '../player/pace-controller.js';
 
@@ -196,9 +197,12 @@ async function buildBundle(
       backdropUrl: item.backdrop_url,
       imdbRating: item.imdb_rating,
     };
-  } else {
+  }
+  let skip: PlayerOpenSkip | null = null;
+  if (!item) {
     const ep = db.getEpisodeByPath(relPath);
     if (ep) {
+      skip = { seriesId: ep.series_id, markers: getMarkersByPath(db, relPath), prefs: getSkipPrefs(db, ep.series_id) };
       const stmt = db.raw.prepare<[number], { title: string | null; poster_url: string | null; backdrop_url: string | null; imdb_rating: number | null }>(
         'SELECT title, poster_url, backdrop_url, imdb_rating FROM media_items WHERE id = ?',
       );
@@ -240,6 +244,7 @@ async function buildBundle(
     activeAudioStreamIndex: tracks.audioStreamIndex ?? null,
     activeBurnSubStreamIndex: tracks.burnSubStreamIndex ?? null,
     resume,
+    skip,
   });
 }
 

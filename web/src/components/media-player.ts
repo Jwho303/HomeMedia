@@ -7,6 +7,7 @@ import {
   apiPlaybackGet,
   apiPlaybackPost,
   apiSeries,
+  apiSetSkipPrefs,
   embeddedSubsUrl,
   hlsBeaconUrl,
   PlayerCapacityError,
@@ -15,7 +16,8 @@ import {
   type PlayerOpenInput,
 } from '../api.js';
 import { PlayerSession, mintPlayerId } from './player-session.js';
-import type { CapacityExceeded, PlayerOpenResponse } from '../types.js';
+import type { CapacityExceeded, PlayerOpenResponse, SkipPrefs } from '../types.js';
+import { SkipTracker, skipTarget, AUTO_SKIP_DELAY_MS, type SkipKind } from '../skip-logic.js';
 import { getConsoleBuffer } from '../console-buffer.js';
 import type {
   AudioStream,
@@ -454,6 +456,63 @@ export class MediaPlayer extends LitElement {
       border-radius: var(--radius-xs);
       font-family: monospace;
       flex-shrink: 0;
+    }
+
+    /* 0.2.1 — Skip Intro / Skip Credits. Sits above the controls, bottom-right,
+     *  and stays visible when the chrome idles out. */
+    .skip-overlay {
+      position: absolute;
+      right: 32px;
+      bottom: 120px;
+      z-index: 25;
+      display: flex;
+      pointer-events: none;
+    }
+    .skip-overlay > * { pointer-events: auto; }
+    .skip-btn {
+      background: rgba(18, 18, 22, 0.78);
+      color: var(--on-scrim);
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: var(--radius-md);
+      padding: 10px 20px;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    .skip-btn:hover, .skip-btn:focus-visible { background: rgba(255, 255, 255, 0.92); color: #111; }
+    .skip-btn.secondary { font-weight: 500; border-color: rgba(255, 255, 255, 0.2); }
+    .skip-toast {
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(18, 18, 22, 0.85);
+      color: var(--on-scrim);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius-lg);
+      padding: 10px 12px 12px 18px;
+      font-size: 15px;
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+    }
+    .skip-toast .skip-btn { padding: 8px 14px; font-size: 14px; }
+    .skip-progress {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      height: 3px;
+      width: 100%;
+      background: var(--accent);
+      transform-origin: left;
+      animation: skip-countdown var(--skip-ms) linear forwards;
+    }
+    @keyframes skip-countdown { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+    @media (max-width: 600px) {
+      .skip-overlay { right: 16px; bottom: 96px; }
     }
 
     /* Centered play/pause */
@@ -1034,6 +1093,13 @@ export class MediaPlayer extends LitElement {
   /** True while the <video> is in browser PiP. Drives the player-bar button's
    *  active state and lets us reflect external PiP exits in the UI. */
   @state() private pipActive = false;
+  /** 0.2.1 — skip intro / credits. Window the playhead is in (button shown). */
+  @state() private skipKind: SkipKind | null = null;
+  /** 0.2.1 — window with an auto-skip countdown running ("Skipping… Watch"). */
+  @state() private autoSkipKind: SkipKind | null = null;
+  private skipTracker: SkipTracker | null = null;
+  private skipTrackerPath = '';
+  private autoSkipTimer: ReturnType<typeof setTimeout> | null = null;
   /** True between an episode auto-advance/change and the next `loadedmetadata`
    *  if PiP was active when the change started. The PiP window is bound to the
    *  old MediaSource and the browser drops out of PiP when hls.js re-attaches;
@@ -1431,6 +1497,7 @@ export class MediaPlayer extends LitElement {
     if (b.resume.position > 0) {
       this.resumePosition = b.resume.position;
     }
+    this.applySkipFromBundle(b);
     // The server is authoritative on streamOffset under the new path.
     this.streamOffset = b.session.encodedWindow.from;
     this.serverEncodedWindow = b.session.encodedWindow;
@@ -1633,6 +1700,10 @@ export class MediaPlayer extends LitElement {
     if (this.pendingSeek === null) {
       this.currentTime = absolute;
     }
+    // Skip windows follow the real playhead. Not gated on `pendingSeek`: that
+    // is only cleared by a respawn (loadedmetadata), so after a scrub that
+    // lands inside the encoded window it stays set and would freeze this.
+    if (!this.seeking && !v.seeking) this.updateSkip(absolute);
     if (this.duration > 0 && !this.watchedFired) {
       if (absolute / this.duration >= WATCHED_RATIO) {
         this.watchedFired = true;
@@ -1829,6 +1900,11 @@ export class MediaPlayer extends LitElement {
       return;
     }
 
+    this.advanceToNext();
+  };
+
+  /** Go to the next episode (or back to the series after the finale). */
+  private advanceToNext(): void {
     const series = getCachedSeriesContaining(this.relPath);
     if (!series) return;
     const idx = series.episodes.findIndex((e) => e.path === this.relPath);
@@ -1849,7 +1925,157 @@ export class MediaPlayer extends LitElement {
     } else {
       navigate(seriesHref(series.series.id), { replace: true });
     }
-  };
+  }
+
+  // ---- 0.2.1 skip intro / credits -------------------------------------
+
+  private applySkipFromBundle(b: PlayerOpenResponse): void {
+    const skip = b.skip ?? null;
+    const markers = skip?.markers ?? null;
+    const prefs: SkipPrefs = skip?.prefs ?? { autoIntro: false, autoCredits: false };
+    if (!this.skipTracker || this.skipTrackerPath !== b.relPath) {
+      this.clearAutoSkip();
+      this.skipKind = null;
+      this.skipTracker = new SkipTracker(markers, prefs);
+      this.skipTrackerPath = b.relPath;
+    } else {
+      this.skipTracker.markers = markers;
+      this.skipTracker.prefs = prefs;
+    }
+  }
+
+  private updateSkip(t: number): void {
+    const tracker = this.skipTracker;
+    if (!tracker) return;
+    const view = tracker.update(t);
+    const kind = view.showButton ? view.kind : null;
+    if (kind !== this.skipKind) this.skipKind = kind;
+    if (this.autoSkipKind && this.autoSkipKind !== kind) this.clearAutoSkip();
+    if (view.startAuto && kind) this.startAutoSkip(kind);
+  }
+
+  private startAutoSkip(kind: SkipKind): void {
+    this.clearAutoSkip();
+    this.autoSkipKind = kind;
+    this.trace('skip.autoStart', { kind });
+    this.autoSkipTimer = setTimeout(() => {
+      this.autoSkipTimer = null;
+      if (this.autoSkipKind === kind) this.doSkip(kind);
+    }, AUTO_SKIP_DELAY_MS);
+  }
+
+  private clearAutoSkip(): void {
+    if (this.autoSkipTimer !== null) clearTimeout(this.autoSkipTimer);
+    this.autoSkipTimer = null;
+    this.autoSkipKind = null;
+  }
+
+  /** "Watch" on the auto-skip toast: keep watching this window, this episode only. */
+  private onWatchInsteadOfSkip(kind: SkipKind): void {
+    this.trace('skip.watch', { kind });
+    this.skipTracker?.cancelAuto(kind);
+    this.clearAutoSkip();
+  }
+
+  private doSkip(kind: SkipKind): void {
+    const markers = this.skipTracker?.markers;
+    this.clearAutoSkip();
+    if (!markers) return;
+    const target = skipTarget(markers, kind, this.duration);
+    this.trace('skip.do', { kind, target });
+    this.skipKind = null;
+    if (target === 'next') {
+      if (this.persister && this.duration > 0) this.persister.flushNow(this.duration, this.duration);
+      this.advanceToNext();
+      return;
+    }
+    if (!this.videoEl) return;
+    this.currentTime = target;
+    this.seeking = true;
+    void this.playerSessionCtl?.seek(target);
+  }
+
+  private async toggleSkipPref(key: keyof SkipPrefs): Promise<void> {
+    const skip = this.playerBundle?.skip;
+    if (!skip) return;
+    const prev = skip.prefs;
+    const value = !prev[key];
+    // Optimistic: flip locally, roll back if the save fails.
+    skip.prefs = { ...prev, [key]: value };
+    if (this.skipTracker) this.skipTracker.prefs = skip.prefs;
+    if (!value) this.clearAutoSkip();
+    this.requestUpdate();
+    try {
+      skip.prefs = await apiSetSkipPrefs(skip.seriesId, { [key]: value });
+    } catch {
+      skip.prefs = prev;
+    }
+    if (this.skipTracker) this.skipTracker.prefs = skip.prefs;
+    this.requestUpdate();
+  }
+
+  private renderSkipPrefsMenu(): unknown {
+    const skip = this.playerBundle?.skip;
+    if (!skip) return null;
+    return html`
+      <div class="menu-divider"></div>
+      <div class="menu-section-title">This show</div>
+      <div class="menu-list">
+        <button
+          class=${skip.prefs.autoIntro ? 'active' : ''}
+          style="--stagger-index:0"
+          @click=${(): void => void this.toggleSkipPref('autoIntro')}
+        >
+          <span>Always skip intro</span>
+          <span class="check-mark">${iconCheck()}</span>
+        </button>
+        <button
+          class=${skip.prefs.autoCredits ? 'active' : ''}
+          style="--stagger-index:0"
+          @click=${(): void => void this.toggleSkipPref('autoCredits')}
+        >
+          <span>Always skip credits</span>
+          <span class="check-mark">${iconCheck()}</span>
+        </button>
+      </div>
+    `;
+  }
+
+  private renderSkipOverlay(): unknown {
+    const markers = this.skipTracker?.markers;
+    const kind = this.skipKind;
+    if (!kind || !markers) return null;
+    const target = skipTarget(markers, kind, this.duration);
+    const label = kind === 'intro' ? 'Skip Intro' : target === 'next' ? 'Next Episode' : 'Skip Credits';
+    const skipNow = (e: Event): void => {
+      e.stopPropagation();
+      this.doSkip(kind);
+    };
+    if (this.autoSkipKind === kind) {
+      const what = kind === 'intro' ? 'intro' : target === 'next' ? 'to next episode' : 'credits';
+      return html`
+        <div class="skip-overlay">
+          <div class="skip-toast" style=${`--skip-ms:${AUTO_SKIP_DELAY_MS}ms`}>
+            <span>Skipping ${what}…</span>
+            <button
+              class="skip-btn secondary"
+              @click=${(e: Event): void => {
+                e.stopPropagation();
+                this.onWatchInsteadOfSkip(kind);
+              }}
+            >Watch</button>
+            <button class="skip-btn" @click=${skipNow}>Skip now</button>
+            <div class="skip-progress"></div>
+          </div>
+        </div>
+      `;
+    }
+    return html`
+      <div class="skip-overlay">
+        <button class="skip-btn" @click=${skipNow}>${label}</button>
+      </div>
+    `;
+  }
 
   private onError = (): void => {
     const v = this.videoEl;
@@ -2292,6 +2518,7 @@ export class MediaPlayer extends LitElement {
       </video>
       ${this.renderBufferSpinner()}
       ${this.nativeControls ? null : this.renderChrome()}
+      ${this.renderSkipOverlay()}
     `;
   }
 
@@ -2832,6 +3059,7 @@ export class MediaPlayer extends LitElement {
               </button>
             `)}
           </div>
+          ${this.renderSkipPrefsMenu()}
         </div>
       </player-popover>
     `;

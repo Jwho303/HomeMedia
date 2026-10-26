@@ -11,6 +11,7 @@ import {
 import { config } from '../config.js';
 import { toNativeAbsolute } from '../paths.js';
 import { tryAcquire } from '../scan-lock.js';
+import { getSkipPrefs } from '../themes/store.js';
 
 interface LibraryItemDto {
   id: number;
@@ -205,6 +206,7 @@ export async function registerLibraryRoutes(app: FastifyInstance): Promise<void>
     return {
       series: toDto(result.item),
       episodes: result.episodes.map(toEpisodeDto),
+      skipPrefs: getSkipPrefs(db, parsed.data.id),
     };
   });
 

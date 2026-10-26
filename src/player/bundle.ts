@@ -36,6 +36,19 @@ export interface PlayerOpenMetadata {
   activeBurnSubStreamIndex: number | null;
 }
 
+/** 0.2.1 — skip intro / credits. Present only for episodes. */
+export interface PlayerOpenSkip {
+  seriesId: number;
+  /** Seconds from file start; null when not detected (or not processed yet). */
+  markers: {
+    introStart: number | null;
+    introEnd: number | null;
+    creditsStart: number | null;
+    creditsEnd: number | null;
+  } | null;
+  prefs: { autoIntro: boolean; autoCredits: boolean };
+}
+
 export interface PlayerOpenResume {
   position: number;
   duration: number;
@@ -51,6 +64,8 @@ export interface PlayerOpenResponse {
   session: PlayerOpenSession;
   metadata: PlayerOpenMetadata;
   resume: PlayerOpenResume;
+  /** 0.2.1 — null for movies. */
+  skip: PlayerOpenSkip | null;
 }
 
 export interface BuildBundleInput {
@@ -72,6 +87,7 @@ export interface BuildBundleInput {
   activeAudioStreamIndex: number | null;
   activeBurnSubStreamIndex: number | null;
   resume: PlayerOpenResume;
+  skip?: PlayerOpenSkip | null;
 }
 
 export function buildOpenBundle(input: BuildBundleInput): PlayerOpenResponse {
@@ -98,5 +114,6 @@ export function buildOpenBundle(input: BuildBundleInput): PlayerOpenResponse {
       activeBurnSubStreamIndex: input.activeBurnSubStreamIndex,
     },
     resume: input.resume,
+    skip: input.skip ?? null,
   };
 }

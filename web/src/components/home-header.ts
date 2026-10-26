@@ -4,6 +4,7 @@ import type { SortMode } from './home-chunks.js';
 import type { ScanPhase } from '../scan-progress-store.js';
 import { navigate } from '../router.js';
 import { iconBumperLeft, iconBumperRight } from './icons.js';
+import './themes-status.js';
 
 export type LibraryToggle = 'movies' | 'series';
 
@@ -453,6 +454,7 @@ export class HomeHeader extends LitElement {
           </div>
         </div>
       </div>
+      <themes-status></themes-status>
     `;
   }
 }

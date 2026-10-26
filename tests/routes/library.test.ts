@@ -270,7 +270,7 @@ describe('library routes', () => {
       poster_url: null, backdrop_url: null, overview: null,
       runtime_seconds: 9300, mtime: 1, scanned_at: 1,
     });
-    db.upsertPlayback({ path: 'Dune.mkv', position: 1200, duration: 9300, updated_at: 5_000 });
+    db.upsertPlayback({ path: 'Dune.mkv', position: 1200, duration: 9300, updated_at: Date.now() - 5_000 });
     const series = db.upsertItem({
       path: 'Show', type: 'series', tmdb_id: 11, title: 'Show', year: 2024,
       poster_url: null, backdrop_url: null, overview: null, mtime: 1, scanned_at: 1,
@@ -279,7 +279,7 @@ describe('library routes', () => {
       series_id: series.id, path: 'Show/S02E04.mkv', season: 2, episode: 4,
       title: null, overview: null, still_url: null, mtime: 1, scanned_at: 1,
     });
-    db.upsertPlayback({ path: 'Show/S02E04.mkv', position: 600, duration: 1500, updated_at: 10_000 });
+    db.upsertPlayback({ path: 'Show/S02E04.mkv', position: 600, duration: 1500, updated_at: Date.now() });
 
     const { buildServer } = await import('../../src/server.js');
     const app = await buildServer();

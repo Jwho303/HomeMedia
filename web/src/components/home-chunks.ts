@@ -37,6 +37,9 @@ export interface HomeCardItem {
   imdbRating: number | null;
   /** Continue rows only. */
   resumeLabel?: string | null;
+  /** Pushed into history before `href`, so Back from the player lands here
+   *  (series Continue cards → the series page). */
+  viaHref?: string;
 }
 
 export interface Chunk {
@@ -100,6 +103,7 @@ export function continueRowToCard(row: ContinueRow): HomeCardItem {
     // and will replace the continue-row card when the user clicks through.
     imdbRating: null,
     resumeLabel: row.resumeLabel,
+    ...(row.type === 'series' ? { viaHref: seriesHref(row.itemId) } : {}),
   };
 }
 

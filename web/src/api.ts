@@ -3,6 +3,7 @@ import type {
   LibraryItem,
   Episode,
   SeriesDetail,
+  SkipPrefs,
   ShareStatus,
   Playback,
   PlaybackPostBody,
@@ -54,6 +55,14 @@ export const apiLibrary = (opts: { includeStale?: boolean } = {}): Promise<Libra
 
 export const apiSeries = (id: number): Promise<SeriesDetail> =>
   api<SeriesDetail>(`/api/series/${id}`);
+
+/** 0.2.1 — set a show's auto-skip intro / credits preference. */
+export const apiSetSkipPrefs = (seriesId: number, patch: Partial<SkipPrefs>): Promise<SkipPrefs> =>
+  api<SkipPrefs>(`/api/series/${seriesId}/skip-prefs`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
 
 /** Continue Watching — unified resumable list. (0.1.3.2) */
 export const apiContinue = async (): Promise<ContinueRow[]> => {

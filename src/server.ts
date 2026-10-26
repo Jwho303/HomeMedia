@@ -2,7 +2,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { config } from './config.js';
+import { config, isConfigured } from './config.js';
+import { getDb } from './db.js';
 import { makeConsolePrettyStream, ConsolePrettyStream } from './log/console-pretty.js';
 import { StatusBlock } from './log/status-block.js';
 import { registerShareRoutes } from './routes/share.js';
@@ -12,6 +13,8 @@ import { registerSetupRoutes } from './routes/setup.js';
 import { registerLibraryRoutes } from './routes/library.js';
 import { registerPlaybackRoutes } from './routes/playback.js';
 import { registerRefreshRoutes } from './routes/refresh.js';
+import { registerSkipRoutes } from './routes/skip.js';
+import { requestSweep, onSweepStatus } from './themes/sweep.js';
 import { registerReprobeRoutes } from './routes/reprobe.js';
 import { registerHlsRoutes } from './routes/hls-segments.js';
 import { registerPlayerRoutes } from './routes/player.js';
@@ -95,6 +98,7 @@ export async function buildServer(opts: BuildServerOptions = {}): Promise<Fastif
     await registerPlaybackRoutes(s);
     await registerManualIdentifyRoutes(s);
     await registerUncategorizedRoutes(s);
+    await registerSkipRoutes(s);
   });
   // Client-log accepts diagnostic reports from the player UI. Registered
   // outside every guard on purpose: reports about playback failures are most
@@ -216,6 +220,12 @@ export async function start(): Promise<void> {
   // `process.on('exit')` is sufficient: the status block just owns an
   // unref'd interval timer with no async work to flush.
   process.once('exit', () => status.detach());
+  // 0.2.1 — skip intro/credits progress on the live line.
+  onSweepStatus((s) => {
+    if (!s.running) return status.setThemes(null);
+    const what = s.phase === 'match' ? 'finding intros' : `fingerprinting ${s.done}/${s.total}`;
+    status.setThemes(`${what}${s.current ? ` (${s.current})` : ''}`);
+  });
 
   // Warm the encoder cache so the first stream request doesn't pay the ffmpeg
   // -encoders cost. Also surfaces NVENC/QSV/VideoToolbox availability in the log.
@@ -237,6 +247,9 @@ export async function start(): Promise<void> {
     { evt: 'startup', host, port: config.port },
     `homemedia listening on http://${host}:${config.port}`,
   );
+  // 0.2.1 — catch up on skip intro/credits fingerprints in the background
+  // (new installs, upgrades, scans that ran from the CLI).
+  if (isConfigured()) requestSweep({ db: getDb(), mediaRoot: config.mediaRoot, logger: app.log });
 }
 
 // Re-export so consumers (status-block, admin route) can pick up the live
